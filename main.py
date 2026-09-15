@@ -85,15 +85,22 @@ def train(args):
     print(f'Optimising {agent.get_parameters().numel():,} parameters '
           f'over {args.generations} generations.')
 
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+
     def report(generation, fitness, lines, frames):
-        print(f'generation {generation:3d} | fitness {fitness:8.1f} | '
-              f'lines {lines:3d} | frames {frames:4d}')
+        # Checkpoint every generation. A run is hours long and the useful
+        # thing it produces is the parameter vector, so saving only at the end
+        # means an interrupt throws all of it away.
+        torch.save(agent.get_parameters(), args.output)
+        print(f'generation {generation + 1:3d}/{args.generations} | '
+              f'fitness {fitness:9.1f} | lines {lines:3d} | frames {frames:4d} '
+              f'| saved')
 
     history = trainer.train(args.generations, on_generation=report)
 
     torch.save(agent.get_parameters(), args.output)
     best = max(fitness for fitness, _, _ in history)
-    print(f'Best fitness {best:.1f} over {args.generations} generations.')
+    print(f'Best fitness {best:.1f} over {len(history)} generations.')
     print(f'Saved parameters to {args.output}')
     print(f'Watch them play with: python main.py serve --parameters {args.output}')
 

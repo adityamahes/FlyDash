@@ -16,8 +16,6 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import torch
-
 from .tetris import Action, TetrisGame
 
 #: Loopback only - the viewer is for this machine, not the network.
@@ -74,19 +72,6 @@ PAGE = """<!doctype html>
   #board div.locked { background: var(--locked); }
   #board div.falling { background: var(--falling); }
 
-  .brain { width: 320px; }
-  #fly {
-    width: 320px; height: 320px; display: block;
-    border: 1px solid rgba(126, 231, 135, 0.25);
-    border-radius: 4px;
-    background: #040804;
-  }
-  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px;
-            margin-top: 8px; opacity: 0.75; }
-  .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px;
-              margin-right: 5px; vertical-align: middle; }
-  .hint { font-size: 11px; opacity: 0.4; margin-top: 8px; }
-
   .panel { min-width: 240px; flex: 1; }
   dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0 0 18px; }
   dt { opacity: 0.55; }
@@ -115,18 +100,6 @@ PAGE = """<!doctype html>
     <p class="sub">a fly connectome playing tetris</p>
     <p class="census" id="census">&nbsp;</p>
     <div id="board"></div>
-  </div>
-
-  <div class="brain">
-    <h2>Brain activity</h2>
-    <canvas id="fly"></canvas>
-    <div class="legend">
-      <span><i style="background:#7ee787"></i>visual</span>
-      <span><i style="background:#ffc857"></i>motor</span>
-      <span><i style="background:#ff79c6"></i>dopamine</span>
-      <span><i style="background:#2c4430"></i>other</span>
-    </div>
-    <p class="hint" id="sampled">&nbsp;</p>
   </div>
 
   <div class="panel">
@@ -165,17 +138,14 @@ PAGE = """<!doctype html>
 
     <footer>
       Board UI after robertrypula/simple-tetris.<br>
-      Amber = the piece the brain still controls.<br>
-      Neurons drawn at their real soma coordinates from neuPrint.
+      Amber = the piece the brain still controls.
     </footer>
   </div>
 </main>
 
 <script>
 const boardEl = document.getElementById('board');
-const canvas = document.getElementById('fly');
-const ctx = canvas.getContext('2d');
-let cells = [], names = null, layout = null, size = 320;
+let cells = [], names = null;
 
 function buildBoard(width, height) {
   boardEl.style.gridTemplateColumns = `repeat(${width}, 1fr)`;
@@ -217,41 +187,10 @@ function drawLogits(logits, chosen) {
   });
 }
 
-// Neuron colours by population: other, visual, motor, dopamine.
-const POP = [[44, 68, 48], [126, 231, 135], [255, 200, 87], [255, 121, 198]];
-
-function sizeCanvas() {
-  const ratio = window.devicePixelRatio || 1;
-  canvas.width = size * ratio;
-  canvas.height = size * ratio;
-  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-}
-
-function drawBrain(activity) {
-  if (!layout) return;
-  ctx.clearRect(0, 0, size, size);
-  ctx.fillStyle = '#040804';
-  ctx.fillRect(0, 0, size, size);
-
-  const pad = 10, span = size - 2 * pad;
-  for (let i = 0; i < layout.x.length; i++) {
-    const pop = layout.pop[i];
-    const a = activity ? activity[i] / 255 : 0;
-    const [r, g, b] = POP[pop];
-    // Inactive neurons stay faintly visible so the anatomy is always legible;
-    // activity brightens and enlarges them.
-    const alpha = pop === 0 ? 0.10 + 0.85 * a : 0.30 + 0.70 * a;
-    const px = pad + layout.x[i] * span;
-    const py = pad + layout.y[i] * span;
-    const d = (pop === 0 ? 1.4 : 2.2) + 2.2 * a;
-    ctx.fillStyle = `rgba(${r},${g},${b},${alpha.toFixed(3)})`;
-    ctx.fillRect(px - d / 2, py - d / 2, d, d);
-  }
-}
-
 function render(state) {
   if (!cells.length) buildBoard(state.width, state.height);
   if (!names) buildLogits(state.action_names);
+  if (state.census) document.getElementById('census').textContent = state.census;
 
   drawBoard(state);
   document.getElementById('episode').textContent = state.episode;
@@ -276,20 +215,6 @@ function render(state) {
       (100 * state.active_fraction).toFixed(1) + '% firing';
 
   drawLogits(state.logits, state.action_index);
-  drawBrain(state.activity);
-
-}
-
-async function boot() {
-  sizeCanvas();
-  const res = await fetch('/brain');
-  layout = await res.json();
-  document.getElementById('census').textContent = layout.census;
-  document.getElementById('sampled').textContent =
-      layout.sampled.toLocaleString() + ' of ' + layout.total.toLocaleString() +
-      ' neurons drawn, sampled to keep the frame small';
-  drawBrain(null);
-  poll();
 }
 
 async function poll() {
@@ -300,82 +225,11 @@ async function poll() {
   setTimeout(poll, 120);
 }
 
-boot();
+poll();
 </script>
 </body>
 </html>
 """
-
-
-def brain_layout(connectome, sample=4200, seed=0):
-    """Choose neurons to draw and project them onto the page.
-
-    All 176,422 neurons cannot go down the wire every frame, so this picks a
-    representative sample once: every motor and dopamine neuron, because those
-    are the populations worth watching, plus a slice of the visual neurons and
-    of everything else for context.
-
-    The projection is the frontal view: neuPrint's x (left-right) and y
-    (dorsal-ventral) soma coordinates, normalised to the unit square, with y
-    flipped so dorsal is up. Neurons whose cell type has no soma location in
-    neuPrint are skipped.
-
-    Args:
-        connectome: The brain to draw. Must carry positions.
-        sample: Roughly how many neurons to draw.
-        seed: Seed for choosing which neurons to include.
-
-    Returns:
-        A dict of parallel lists the page renders directly: x, y in [0, 1] and
-        pop in 0..3 (other, visual, motor, dopamine), plus a census string.
-
-    Raises:
-        ValueError: If the connectome has no positions.
-    """
-    if connectome.positions is None:
-        raise ValueError('This connectome has no soma positions. Rebuild it, '
-                         'or serve without the brain panel.')
-
-    positions = connectome.positions
-    placed = ~torch.isnan(positions[:, 0])
-
-    # Population code per neuron; later assignments win, so the small
-    # populations are never masked by the large ones.
-    pop = torch.zeros(len(connectome), dtype=torch.long)
-    pop[connectome.visual] = 1
-    pop[connectome.motor] = 2
-    pop[connectome.reward] = 3
-
-    generator = torch.Generator().manual_seed(seed)
-    keep = torch.zeros(len(connectome), dtype=torch.bool)
-    for code, share in ((3, 1.0), (2, 1.0), (1, 0.09), (0, 0.02)):
-        members = ((pop == code) & placed).nonzero().squeeze(1)
-        if share >= 1.0:
-            chosen = members
-        else:
-            take = max(1, int(len(members) * share))
-            chosen = members[torch.randperm(len(members), generator=generator)[:take]]
-        keep[chosen] = True
-
-    index = keep.nonzero().squeeze(1)
-    xy = positions[index][:, :2]
-    low, high = xy.min(dim=0).values, xy.max(dim=0).values
-    unit = (xy - low) / (high - low).clamp(min=1e-6)
-
-    return {
-        'index': index,
-        'x': [round(v, 4) for v in unit[:, 0].tolist()],
-        # Flip y so dorsal is at the top of the canvas.
-        'y': [round(1.0 - v, 4) for v in unit[:, 1].tolist()],
-        'pop': pop[index].tolist(),
-        'sampled': len(index),
-        'total': len(connectome),
-        'census': (f'{len(connectome):,} neurons - '
-                   f'{connectome.matrix._nnz() / 1e6:.1f}M synapses - '
-                   f'{len(connectome.visual):,} visual - '
-                   f'{len(connectome.motor):,} motor - '
-                   f'{len(connectome.reward):,} dopamine'),
-    }
 
 
 class GameRunner:
@@ -409,10 +263,15 @@ class GameRunner:
         self.max_frames = max_frames
         self.seed = seed
 
-        self.layout = brain_layout(agent.connectome)
-        self._sample = self.layout['index']
         self._total = 0.0
         self._frame = 0
+
+        connectome = agent.connectome
+        self._census = (f'{len(connectome):,} neurons - '
+                        f'{connectome.matrix._nnz() / 1e6:.1f}M synapses - '
+                        f'{len(connectome.visual):,} visual - '
+                        f'{len(connectome.motor):,} motor - '
+                        f'{len(connectome.reward):,} dopamine')
 
         self._lock = threading.Lock()
         self._state = self._describe(TetrisGame(seed=seed), action=None, frame=0,
@@ -501,10 +360,7 @@ class GameRunner:
             'reward_total': round(float(self._total), 1),
             'dopamine': round(float(self.agent.dopamine), 4),
             'board': game.features(),
-            # Firing rate of each drawn neuron, quantised to a byte to keep the
-            # frame small. The page holds the matching layout from /brain.
-            'activity': (self.agent.rates[self._sample]
-                         .clamp(0, 1).mul(255).to(torch.uint8).tolist()),
+            'census': self._census,
         }
 
 
@@ -524,11 +380,6 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == '/state':
             body = json.dumps(self.runner.snapshot()).encode()
             self._respond('application/json', body)
-        elif self.path == '/brain':
-            # The neuron layout never changes, so the page fetches it once and
-            # only the per-frame activity rides along with /state.
-            layout = {k: v for k, v in self.runner.layout.items() if k != 'index'}
-            self._respond('application/json', json.dumps(layout).encode())
         else:
             self.send_error(404)
 
