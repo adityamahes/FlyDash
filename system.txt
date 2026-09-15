@@ -1,0 +1,77 @@
+System Overview: Fly-Connectome Tetris Agent
+Core simulation
+Base: real fly brain connectome (~166,700 neurons, ~125M synapses), fixed/frozen, never updated
+Each neuron: leaky integrate-and-fire (LIF) unit — accumulates charge, decays over time, fires binary spike at threshold, resets
+Global params: MEMBRANE_DECAY_RATE, FIRING_THRESHOLD, SYNAPTIC_WEIGHT_PER_SYNAPSE — uniform across all neurons (simplification)
+
+1. Encoder (trainable) — Game State → Sensory Neurons
+Input: 20×20 binary matrix
+Top half (10×20): placed/locked blocks → 1, empty → 0
+Bottom half (10×20): currently-controlled falling piece → 1, everything else → 0
+Output: current-injection vector aligned to visual neuron indices (visual_neuron_indices)
+Implementation: small trainable layer (e.g. nn.Linear(400, num_visual_neurons))
+Not hand-coded — this is the piece meant to be learned
+
+2. Connectome Simulation (frozen) — Sensory Input → Motor Spikes
+Input: encoder's current vector, injected only at visual neuron positions
+Process, per timestep:
+Recurrent current = frozen wiring matrix × previous spikes
+Membrane potential = decayed potential + recurrent current + external current
+Spike = potential > threshold (binary 0/1)
+Reset potential of neurons that spiked
+Repeated many timesteps per game frame (dt << membrane time constant)
+Output: spike vector over all ~166,700 neurons, only motor neuron subset used downstream
+
+3. Decoder (trainable) — Motor Spikes → Game Action
+Input: spike activity at motor_neuron_indices (real, biologically-identified descending neurons)
+Output: 4 nodes — Move Left, Move Right, Rotate Left, Rotate Right
+Action selection: argmax (highest-value node = chosen control)
+Implementation: small trainable layer mapping motor spike rates → 4 logits
+
+4. Reward/Punishment — Game Outcome → Dopamine Neurons
+Not learned — fixed scalar injection, same mechanism as sensory/motor but simpler signal
+Trigger events (Tetris-specific), e.g.:
+Line cleared → positive current injected at reward_neuron_indices
+Piece locked badly / topped out / game over → negative current injected
+(Optional, if graded reward wanted later) height increase, holes created → smaller negative signal
+Mechanism: current added directly to dopamine neuron membrane potential, same as any external input
+Effect: forces dopamine neurons to spike (or suppresses firing) regardless of ambient network activity
+Downstream: dopamine spike modulates plasticity only at mushroom-body synapses (biologically the plastic subset) — not the whole connectome
+
+5. What Actually Learns vs. What Stays Fixed
+Component
+Trainable?
+Notes
+Connectome wiring matrix
+No
+Real anatomy, permanently frozen
+Encoder (game→sensory)
+Yes
+Only place game-specific structure is learned
+Decoder (motor→action)
+Yes
+Maps real neuron output to 4 discrete controls
+Reward injection
+No
+Fixed scalar, deliberately kept as external ground truth
+Mushroom-body synapses (optional)
+Yes, via reward-modulated STDP
+Only if biological plasticity implemented
+
+
+6. Training Loop, Per Step
+Get game state → build 20×20 matrix
+Encoder → current vector → inject into visual neurons
+Run simulation N timesteps → collect motor neuron spikes
+Decoder → 4 logits → argmax → chosen action
+Apply action to Tetris engine → get outcome (line clear / lock / game over)
+Convert outcome → reward current → inject into dopamine neurons → run 1+ more timesteps
+Update encoder/decoder weights via RL (policy gradient / evolutionary strategy) using game score as reward signal
+(Optional) update mushroom-body synapse weights via local STDP rule using dopamine spike + eligibility trace
+
+7. Key Design Notes
+Discrete vs continuous: spikes are binary (0/1), membrane potential is continuous, discretization happens only at threshold comparison
+No backprop through the connectome itself — hard spike threshold has no usable gradient
+Encoder/decoder are the only differentiable/black-box-optimizable parts
+Reward is a single scalar-style signal (not learned), matching real dopamine's role as an unconditioned "this was good/bad" teaching signal, not a structured perception like vision
+

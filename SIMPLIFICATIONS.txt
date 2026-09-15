@@ -1,0 +1,129 @@
+TetriFLY - what was deliberately left out of the first iteration
+================================================================
+
+This file is the running list of everything cut from the design in system.txt,
+so nothing is lost by accident. Each entry says what it was, why it went, and
+roughly what it would take to add back.
+
+
+1. MUSHROOM-BODY PLASTICITY (reward-modulated STDP)
+---------------------------------------------------
+Was: the design's optional component - Kenyon cell -> MBON synapses that learn
+     from dopamine via spike-timing eligibility traces, the one biologically
+     plastic subset of the connectome.
+Why: it is the single largest piece of machinery in the system and it is marked
+     optional in the design. Everything else works without it; the encoder and
+     decoder do the actual learning.
+Cost to restore: a Plasticity class holding (pre, post) index pairs for the
+     KC->MBON synapses, a per-synapse eligibility trace updated each timestep
+     from pre/post spike coincidence, and a weight delta consolidated when the
+     dopamine neurons deviate from their baseline. The agent would add its
+     current into the injection each timestep, and the frozen matrix would stay
+     untouched. Needs KC and MBON cell-type patterns on the Connectome.
+
+Removed with it:
+  - The dopamine firing rate returned by the reward injection (nothing reads it
+    now; reward current is injected and that is the end of it).
+  - KENYON_CELL / MUSHROOM_BODY_OUTPUT cell type patterns.
+  - The --plasticity command line flag.
+
+
+2. TETRIS RULES
+---------------
+Left out, because the agent has only four controls (left, right, rotate left,
+rotate right) and the first iteration should be easy to reason about:
+
+  - Next-piece preview. The agent cannot see what is coming.
+  - Hold slot / piece swapping.
+  - Soft drop and hard drop. Gravity is exactly one row per frame, always.
+  - Wall kicks (SRS). A rotation that does not fit is simply ignored.
+  - Levels, speed-up, gravity that accelerates.
+  - 7-bag randomiser. Pieces are now drawn uniformly at random, so the same
+    piece can repeat and a needed piece can be starved indefinitely.
+  - Multi-line score bonus (100 / 300 / 500 / 800 for 1-4 rows). The score is
+    now simply the number of rows cleared; a Tetris is worth four singles.
+  - Lock delay, ghost piece, T-spin recognition, scoring for drops.
+
+Cost to restore: a preview is one extra field on TetrisGame plus more inputs on
+the encoder; a bag randomiser is a shuffled list popped from; scoring tiers are
+a lookup table indexed by rows cleared.
+
+
+3. GRADED REWARD SIGNAL
+------------------------
+Was: the design's optional extra - smaller negative current for creating holes
+     or increasing stack height, on top of the line-clear reward and the
+     top-out punishment.
+Why: marked optional in the design, and it needs board statistics the game no
+     longer computes.
+Now: reward is line cleared -> +2.0, game over -> -2.0, injected at the
+     dopamine neurons. Nothing else.
+Cost to restore: count_covered_holes() and stack_height() methods on
+     TetrisGame, measured before and after each lock, and two more terms in
+     Agent._inject_reward.
+
+
+4. BOARD STATISTICS AND FITNESS SHAPING
+----------------------------------------
+Was: covered-hole count and stack height, used both for the graded reward and
+     as penalty terms in the training fitness.
+Why: removed along with the graded reward.
+Now: fitness = 200 * lines_cleared + frames_survived. Survival time is what
+     gives evolution a gradient before the agent can clear a line at all.
+Note: cleared lines alone are useless as a fitness. An untrained policy never
+     clears one, so every candidate scores exactly zero and there is nothing for
+     evolution to climb. This was measured, not assumed.
+
+
+5. STRUCTURE
+------------
+  - A separate config module. Constants now live as class attributes on the
+    class that uses them, next to the code that reads them.
+  - Separate modules for the network, the encoder/decoder, the training loop
+    and the synthetic brain. These are now three files: brain.py, tetris.py,
+    agent.py.
+  - Dataclasses for step outcomes, frame traces and episode results. step()
+    returns (lines, over) and play_episode() returns (lines, frames). The
+    agent keeps its last firing rates and logits as plain attributes for
+    inspection.
+  - Separate observation_planes() and observation_matrix(). One observation()
+    now returns the flat 400-value vector the encoder consumes.
+
+
+6. WHAT WAS ADDED, NOT REMOVED
+-------------------------------
+Two things in the code are not in system.txt. Both were necessary to make the
+system actually run, and both are measured rather than guessed:
+
+  a) Connectome._normalise_input - rescales each neuron's incoming synapses so
+     every neuron receives the same total excitatory drive.
+
+     The design gives every neuron one shared firing threshold, but real
+     neurons differ by orders of magnitude in how many synapses they receive.
+     Under one threshold the well-connected majority is pushed far past it by
+     recurrent activity alone, the network saturates, and the sensory current
+     from the encoder is lost completely. Measured: without this, perturbing
+     the encoder had no effect on the motor neurons whatsoever - every
+     candidate in a generation produced an identical episode, and evolution had
+     a perfectly flat landscape. Normalising leaves the relative strength and
+     the sign of every synapse untouched; only the input gain is equalised.
+
+     Pass normalise=False to Connectome() for the literal, unnormalised model.
+
+  b) Encoder.SCALE (= 10.0) - a gain on the encoder output. A freshly
+     initialised linear layer reading a sparse binary board emits currents
+     around 0.1, against a firing threshold of 1.0, so the network ignores it.
+     Training can shrink the weights back down if it wants to.
+
+
+7. KNOWN LIMITATIONS OF THIS ITERATION
+---------------------------------------
+  - Training uses one fixed piece sequence for the whole run, so the agent can
+    overfit to it. This is on purpose: with a fresh sequence per generation the
+    luck of the draw swamps any real progress and the numbers are unreadable.
+    Vary Trainer(seed=...) across runs to check it generalises.
+  - Evolutionary strategies on ~40,000 parameters needs far more episodes than
+    a short run provides. Expect no cleared lines from a handful of generations.
+  - The agent is evaluated on one episode per candidate, so fitness is noisy.
+  - The synthetic brain is ~200 neurons. It exists so the code runs without a
+    neuPrint token; it is not a model of anything.

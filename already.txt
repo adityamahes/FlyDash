@@ -1,0 +1,50 @@
+Dataset & Preprocessing: From neuPrint Tables → Connectivity Matrix
+Table 1: neuron_table (from fetch_neurons())
+One row per neuron
+Columns used: bodyId (unique ID), type (cell type name, used to find visual/motor/reward populations), predictedNt (predicted neurotransmitter), predictedNtProb (confidence score)
+~166,700 rows total
+Table 2: connection_table (from fetch_adjacencies())
+One row per synaptic connection, per brain region
+Columns: bodyId_pre (sending neuron), bodyId_post (receiving neuron), roi (brain region), weight (raw synapse count)
+Same pre/post pair can appear multiple times (once per shared ROI) — far more rows than neurons (~125M)
+
+Processing steps to build the matrix
+Collapse ROI duplicates
+
+
+Group by (bodyId_pre, bodyId_post), sum weight across regions
+Result: one row per unique connected pair, total synapse count
+Assign sign per connection
+
+
+Build neuron_id_to_transmitter dict: bodyId → predictedNt (from Table 1)
+Map bodyId_pre in connection table → transmitter name
+Map transmitter name → sign (+1 excitatory / −1 inhibitory) via TRANSMITTER_SIGN_MAP
+Unmapped/neuromodulator transmitters → default fallback (fillna)
+Compute signed strength
+
+
+signed_connection_strengths = weight × sign
+One float per connected pair (e.g. −163, +60, +15)
+Build index lookup
+
+
+neuron_id_to_index: bodyId → row/column position (0 to N−1)
+Converts arbitrary large ID numbers into compact matrix positions
+Assemble sparse matrix
+
+
+For each connection row: look up (bodyId_pre → index i, bodyId_post → index j, signed_strength → value)
+Place value at matrix position [i][j]
+Row i = sending neuron (neuron A), column j = receiving neuron (neuron B)
+matrix[i][j] = how strongly neuron A's spike pushes neuron B's membrane potential (positive = excites, negative = inhibits, magnitude = synapse count-based strength)
+Stored as torch.sparse_coo_tensor — only nonzero connections stored explicitly, everything else implicitly 0
+Result
+
+
+Fixed N×N matrix (N ≈ 166,700), never updated during training
+Used every timestep: recurrent_input = matrix × previous_spike_vector, propagating real fly wiring forward through the simulation
+
+
+
+
