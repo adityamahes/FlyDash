@@ -159,5 +159,10 @@ thing, and console output is not needed:
   - Evolutionary strategies on ~40,000 parameters needs far more episodes than
     a short run provides. Expect no cleared lines from a handful of generations.
   - The agent is evaluated on one episode per candidate, so fitness is noisy.
-  - The synthetic brain is ~200 neurons. It exists so the code runs without a
-    neuPrint token; it is not a model of anything.
+  - The synthetic brain (~200 generated neurons, for running without a token)
+    has been removed. Everything now runs on the real male-cns:v1.0 connectome,
+    so a token and a one-off build are required. Note what its removal exposed:
+    it populated predictedNtProb, which the real dataset leaves null for every
+    neuron, so the confidence gate in _signed_strengths was silently discarding
+    every transmitter and making the whole brain excitatory. The gate now
+    applies only where there is confidence data to gate on.

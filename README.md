@@ -23,15 +23,49 @@ as a black box with evolutionary strategies.
 
 ## Running it
 
-### With the fake (synthetic) brain — no setup
+### Setup
 
-`serve` and `train` fall back to a small synthetic brain built through the exact
-same pipeline, so nothing needs a token or a download.
+Everything runs on the real connectome, so the token and a one-off build are
+required; there is no synthetic fallback.
+
+You need a free [neuPrint](https://neuprint.janelia.org) token (log in, then
+your account page). Put it in `tetrifly/local_config.py`, which is gitignored
+so the token is never committed:
+
+```python
+TOKEN = 'paste-your-token-here'
+```
+
+Two other ways to supply it, if you would rather not keep it on disk — an
+environment variable, or a one-off flag:
+
+```bash
+export NEUPRINT_TOKEN=paste-your-token-here   # Windows: $env:NEUPRINT_TOKEN="..."
+python main.py build --token paste-your-token-here
+```
+
+A `token=...` argument wins over `$NEUPRINT_TOKEN`, which wins over
+`local_config.TOKEN`.
+
+Check that the token works and that the dataset still matches what the
+pipeline expects — this takes seconds, and is worth doing before the build:
+
+```bash
+python check_access.py
+```
+
+Then fetch and cache the connectome once. This is a large download and the
+preprocessing takes a while:
+
+```bash
+python main.py build
+```
+
+That writes `data/connectome.pt`, which `serve` and `train` load by default:
 
 ```bash
 python main.py serve                    # then open http://127.0.0.1:8000
-python main.py train --generations 25   # optimise the encoder and decoder
-python -m unittest test_tetrifly -v     # 70 tests
+python main.py train --generations 25
 ```
 
 `serve` plays episode after episode in a background thread and streams each
@@ -45,27 +79,9 @@ python main.py serve --port 9000
 
 The viewer binds to loopback only; it is for this machine, not the network.
 
-### With the real fly brain
-
-You need a free [neuPrint](https://neuprint.janelia.org) token (log in, then
-your account page). Fetch and cache the connectome once — it is a large
-download and the preprocessing takes a while:
-
-```bash
-export NEUPRINT_TOKEN=paste-your-token-here   # Windows: $env:NEUPRINT_TOKEN="..."
-python main.py build --output data/connectome.pt
-```
-
-Then point any command at the cached file:
-
-```bash
-python main.py serve --connectome data/connectome.pt
-python main.py train --connectome data/connectome.pt --generations 25
-```
-
-Expect the real brain to be far slower per frame than the synthetic one: each
-Tetris frame is 25 sparse matrix multiplies against ~166,700 neurons. Start with
-`--delay 0` and a low `--frames` to see how fast your machine manages.
+Expect it to be slow per frame: each Tetris frame is 25 sparse matrix
+multiplies against ~166,700 neurons. Start with `--delay 0` and a low
+`--frames` to see how fast your machine manages.
 
 ### Watching it
 
@@ -93,6 +109,12 @@ One class per concept:
 
 Tunable constants live as class attributes next to the code that reads them —
 `SpikingNetwork.THRESHOLD`, `Connectome.WEIGHT_PER_SYNAPSE`, `Trainer.SIGMA`.
+The neuPrint token is the exception: it lives in the gitignored
+`tetrifly/local_config.py`.
+
+`check_access.py` verifies the token, the dataset schema, the cell-type
+regexes and the synapse signs against the live server, without downloading
+the adjacency table.
 
 ### Building the wiring matrix
 

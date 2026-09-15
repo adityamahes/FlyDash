@@ -20,6 +20,9 @@ build/
 .env
 .env.*
 
+# Machine-local constants (holds the neuPrint token)
+tetrifly/local_config.py
+
 # OS
 .DS_Store
 Thumbs.db

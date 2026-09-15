@@ -2,33 +2,40 @@
 
 Three subcommands::
 
-    python main.py serve                               # watch it in a browser
-    python main.py train --generations 20              # optimise the agent
-    python main.py build --output data/connectome.pt   # fetch the real brain
+    python main.py build                   # fetch and cache the real brain
+    python main.py serve                   # watch it in a browser
+    python main.py train --generations 20  # optimise the agent
 
-``serve`` and ``train`` use a small synthetic brain unless ``--connectome``
-points at a file built by ``build``, so the project runs with no neuPrint token
-and no download.
+``build`` must be run once before the others: it downloads the connectome from
+neuPrint and caches it at ``CONNECTOME_PATH``, which ``serve`` and ``train``
+then load. All three work on the real fly brain; there is no synthetic mode.
 """
 
 import argparse
 import sys
+from pathlib import Path
 
 from tetrifly import Agent, Connectome, Trainer, web
 
+# Where build writes the cached brain, and where serve and train look for it.
+CONNECTOME_PATH = 'data/connectome.pt'
+
 
 def load_connectome(path):
-    """Load the brain a run should use.
+    """Load the cached brain a run should use.
 
     Args:
-        path: A file written by ``build``, or None for the synthetic brain.
+        path: A file previously written by ``build``.
 
     Returns:
         The Connectome to simulate.
+
+    Raises:
+        SystemExit: If no cached connectome exists at ``path``.
     """
-    if path is None:
-        print('No --connectome given; using a small synthetic brain.')
-        return Connectome.synthetic()
+    if not Path(path).exists():
+        raise SystemExit(f'No connectome at {path}. Fetch it first with: '
+                         f'python main.py build --output {path}')
 
     print(f'Loading {path} ...')
     return Connectome.load(path)
@@ -83,8 +90,9 @@ def main(argv=None):
     commands = parser.add_subparsers(dest='command', required=True)
 
     build_parser = commands.add_parser('build', help='Fetch the connectome and cache it.')
-    build_parser.add_argument('--token', help='neuPrint token (default: $NEUPRINT_TOKEN).')
-    build_parser.add_argument('--output', default='data/connectome.pt')
+    build_parser.add_argument('--token', help='neuPrint token (default: '
+                              '$NEUPRINT_TOKEN, then local_config.TOKEN).')
+    build_parser.add_argument('--output', default=CONNECTOME_PATH)
     build_parser.set_defaults(run=build)
 
     serve_parser = commands.add_parser('serve', help='Watch it play in a browser.')
@@ -100,7 +108,8 @@ def main(argv=None):
     train_parser.set_defaults(run=train)
 
     for subparser in (serve_parser, train_parser):
-        subparser.add_argument('--connectome', help='Cached brain (default: synthetic).')
+        subparser.add_argument('--connectome', default=CONNECTOME_PATH,
+                               help='Cached brain from build.')
         subparser.add_argument('--frames', type=int, default=Trainer.MAX_FRAMES,
                                help='Frame budget per episode.')
         subparser.add_argument('--seed', type=int, default=0)
