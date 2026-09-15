@@ -92,9 +92,6 @@ class Piece:
         self.row = row
         self.col = col
 
-    def __repr__(self):
-        return f'<Piece {self.name} r{self.rotation} at ({self.row}, {self.col})>'
-
     def cells(self):
         """Return the four board cells this piece fills.
 
@@ -152,9 +149,6 @@ class TetrisGame:
         """
         self._rng = random.Random(seed)
         self.reset()
-
-    def __repr__(self):
-        return f'<TetrisGame lines={self.lines} over={self.over}>'
 
     def reset(self):
         """Clear the board and spawn the first piece."""
@@ -285,27 +279,3 @@ class TetrisGame:
                 falling[row, col] = 1.0
 
         return torch.cat([locked, falling.reshape(-1)])
-
-    def render(self):
-        """Draw the board as text, for watching a run.
-
-        Returns:
-            A multi-line string: '#' locked, '@' the falling piece, '.' empty.
-        """
-        falling = set() if self.over else set(self.piece.cells())
-
-        lines = []
-        for row in range(self.HEIGHT):
-            cells = []
-            for col in range(self.WIDTH):
-                if self.board[row][col]:
-                    cells.append('#')
-                elif (row, col) in falling:
-                    cells.append('@')
-                else:
-                    cells.append('.')
-            lines.append('|' + ''.join(cells) + '|')
-
-        lines.append('+' + '-' * self.WIDTH + '+')
-        lines.append(f'lines cleared: {self.lines}')
-        return '\n'.join(lines)

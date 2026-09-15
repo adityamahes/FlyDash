@@ -23,27 +23,62 @@ as a black box with evolutionary strategies.
 
 ## Running it
 
-Nothing here needs a neuPrint token to run — `play` and `train` fall back to a
-small synthetic brain built through the exact same pipeline.
+### With the fake (synthetic) brain — no setup
+
+`serve` and `train` fall back to a small synthetic brain built through the exact
+same pipeline, so nothing needs a token or a download.
 
 ```bash
-python main.py play --render          # watch one episode
-python main.py train --generations 25 # optimise the encoder and decoder
-python -m unittest test_tetrifly -v   # 65 tests
+python main.py serve                    # then open http://127.0.0.1:8000
+python main.py train --generations 25   # optimise the encoder and decoder
+python -m unittest test_tetrifly -v     # 70 tests
 ```
 
-For the real thing you need a [neuPrint](https://neuprint.janelia.org) token.
-The download is large, so it is cached:
+`serve` plays episode after episode in a background thread and streams each
+frame to the browser. `--delay` is the pause after every frame, in seconds:
 
 ```bash
-export NEUPRINT_TOKEN=...
+python main.py serve --delay 0.4        # slow, easy to follow
+python main.py serve --delay 0          # as fast as the simulation runs
+python main.py serve --port 9000
+```
+
+The viewer binds to loopback only; it is for this machine, not the network.
+
+### With the real fly brain
+
+You need a free [neuPrint](https://neuprint.janelia.org) token (log in, then
+your account page). Fetch and cache the connectome once — it is a large
+download and the preprocessing takes a while:
+
+```bash
+export NEUPRINT_TOKEN=paste-your-token-here   # Windows: $env:NEUPRINT_TOKEN="..."
 python main.py build --output data/connectome.pt
-python main.py play --connectome data/connectome.pt --render
 ```
+
+Then point any command at the cached file:
+
+```bash
+python main.py serve --connectome data/connectome.pt
+python main.py train --connectome data/connectome.pt --generations 25
+```
+
+Expect the real brain to be far slower per frame than the synthetic one: each
+Tetris frame is 25 sparse matrix multiplies against ~166,700 neurons. Start with
+`--delay 0` and a low `--frames` to see how fast your machine manages.
+
+### Watching it
+
+The browser view draws the board as a grid of square cells (styled after
+[robertrypula/simple-tetris](https://github.com/robertrypula/simple-tetris)) and,
+alongside it, what the brain is doing: the size of each neuron population, how
+hard the motor neurons are firing, and the four decoder logits as bars with the
+winning one highlighted. Green cells are locked; amber is the piece the brain
+still controls.
 
 ## The code
 
-Three modules, one class per concept:
+One class per concept:
 
 | File | Class | What it does |
 |---|---|---|
@@ -53,6 +88,8 @@ Three modules, one class per concept:
 | `tetrifly/agent.py` | `Encoder`, `Decoder` | the two trainable layers |
 | | `Agent` | one frame: see, simulate, act, be rewarded |
 | | `Trainer` | evolutionary strategies |
+| `tetrifly/web.py` | `GameRunner` | plays in a thread, publishes a snapshot |
+| | `Handler` | serves the page and `/state` (stdlib only) |
 
 Tunable constants live as class attributes next to the code that reads them —
 `SpikingNetwork.THRESHOLD`, `Connectome.WEIGHT_PER_SYNAPSE`, `Trainer.SIGMA`.

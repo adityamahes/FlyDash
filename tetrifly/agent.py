@@ -176,15 +176,16 @@ class Agent:
             current[self.connectome.reward] = amount
         self.network.run(current, self.REWARD_TIMESTEPS)
 
-    def play_episode(self, game, max_frames=500, on_frame=None):
+    def play_episode(self, game, max_frames=500):
         """Play until the game ends or the frame budget runs out.
+
+        This runs flat out, for training. The browser view drives
+        :meth:`play_frame` itself so it can pace the game and publish each frame.
 
         Args:
             game: A fresh game to play. Mutated in place.
             max_frames: Frame budget, so a policy that never tops out still
                 terminates.
-            on_frame: Optional callable ``on_frame(game, action)``, for
-                rendering or logging.
 
         Returns:
             (lines_cleared, frames_played) for the episode.
@@ -193,10 +194,8 @@ class Agent:
 
         frames = 0
         for _ in range(max_frames):
-            action = self.play_frame(game)
+            self.play_frame(game)
             frames += 1
-            if on_frame:
-                on_frame(game, action)
             if game.over:
                 break
 
@@ -302,23 +301,20 @@ class Trainer:
         self.seed = seed
         self._rng = torch.Generator().manual_seed(seed)
 
-    def evaluate(self, vector, game_seed=None):
+    def evaluate(self, vector):
         """Play one episode with one candidate parameter vector.
+
+        Every candidate shares the trainer's seed, so differences in fitness
+        reflect the parameters rather than the luck of the piece sequence.
 
         Args:
             vector: Candidate encoder and decoder parameters.
-            game_seed: Seed for the piece sequence, defaulting to the trainer's
-                own. Every candidate must share it, or differences in fitness
-                would only reflect differences in luck.
 
         Returns:
             (fitness, lines_cleared, frames_played).
         """
-        if game_seed is None:
-            game_seed = self.seed
-
         self.agent.set_parameters(vector)
-        lines, frames = self.agent.play_episode(TetrisGame(seed=game_seed),
+        lines, frames = self.agent.play_episode(TetrisGame(seed=self.seed),
                                                 max_frames=self.max_frames)
         return self.LINE_WEIGHT * lines + frames, lines, frames
 

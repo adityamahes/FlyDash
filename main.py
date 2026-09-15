@@ -2,11 +2,11 @@
 
 Three subcommands::
 
-    python main.py build --output data/connectome.pt   # fetch the real brain
-    python main.py play --render                       # watch one episode
+    python main.py serve                               # watch it in a browser
     python main.py train --generations 20              # optimise the agent
+    python main.py build --output data/connectome.pt   # fetch the real brain
 
-``play`` and ``train`` use a small synthetic brain unless ``--connectome``
+``serve`` and ``train`` use a small synthetic brain unless ``--connectome``
 points at a file built by ``build``, so the project runs with no neuPrint token
 and no download.
 """
@@ -14,7 +14,7 @@ and no download.
 import argparse
 import sys
 
-from tetrifly import Agent, Connectome, TetrisGame, Trainer
+from tetrifly import Agent, Connectome, Trainer, web
 
 
 def load_connectome(path):
@@ -44,23 +44,13 @@ def build(args):
     print(f'Saved to {args.output}')
 
 
-def play(args):
-    """Play one episode and report how it went."""
+def serve(args):
+    """Play continuously and stream the board to a browser."""
     connectome = load_connectome(args.connectome)
     print(connectome)
 
-    agent = Agent(connectome)
-    game = TetrisGame(seed=args.seed)
-
-    def show(current, action):
-        if args.render:
-            print(current.render())
-            print(f'action: {action.name}\n')
-
-    lines, frames = agent.play_episode(game, max_frames=args.frames, on_frame=show)
-
-    print(game.render())
-    print(f'Finished after {frames} frames: {lines} lines, topped out {game.over}')
+    web.serve(Agent(connectome), port=args.port, delay=args.delay,
+              max_frames=args.frames, seed=args.seed)
 
 
 def train(args):
@@ -97,9 +87,11 @@ def main(argv=None):
     build_parser.add_argument('--output', default='data/connectome.pt')
     build_parser.set_defaults(run=build)
 
-    play_parser = commands.add_parser('play', help='Play one episode.')
-    play_parser.add_argument('--render', action='store_true', help='Print every frame.')
-    play_parser.set_defaults(run=play)
+    serve_parser = commands.add_parser('serve', help='Watch it play in a browser.')
+    serve_parser.add_argument('--port', type=int, default=web.PORT)
+    serve_parser.add_argument('--delay', type=float, default=web.GameRunner.DELAY,
+                              help='Seconds to pause after each frame.')
+    serve_parser.set_defaults(run=serve)
 
     train_parser = commands.add_parser('train', help='Train the encoder and decoder.')
     train_parser.add_argument('--generations', type=int, default=10)
@@ -107,9 +99,10 @@ def main(argv=None):
                               help='Perturbation pairs per generation.')
     train_parser.set_defaults(run=train)
 
-    for subparser in (play_parser, train_parser):
+    for subparser in (serve_parser, train_parser):
         subparser.add_argument('--connectome', help='Cached brain (default: synthetic).')
-        subparser.add_argument('--frames', type=int, default=Trainer.MAX_FRAMES)
+        subparser.add_argument('--frames', type=int, default=Trainer.MAX_FRAMES,
+                               help='Frame budget per episode.')
         subparser.add_argument('--seed', type=int, default=0)
 
     args = parser.parse_args(argv)

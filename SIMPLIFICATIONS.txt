@@ -116,7 +116,41 @@ system actually run, and both are measured rather than guessed:
      Training can shrink the weights back down if it wants to.
 
 
-7. KNOWN LIMITATIONS OF THIS ITERATION
+7. THE BROWSER VIEW
+-------------------
+`python main.py serve` runs the game in a background thread and serves a page
+that polls for the latest frame. It uses only the standard library, so there is
+no web framework to install.
+
+Kept deliberately small:
+  - Polling every 60 ms, not websockets or server-sent events.
+  - One snapshot, the most recent frame. A slow browser never blocks the game,
+    and never sees a half-written board.
+  - No controls in the page. It is a viewer; the brain plays.
+  - The board style follows robertrypula/simple-tetris: a grid of square cells
+    where colour marks what is filled.
+
+
+8. THE TERMINAL PLAY PATH
+--------------------------
+Removed once the browser view existed - it was a second way to do the same
+thing, and console output is not needed:
+
+  - The `play` subcommand and its --render and --delay flags.
+  - TetrisGame.render(), which drew the board as ASCII art.
+  - The on_frame callback on Agent.play_episode, which only existed to let the
+    terminal print each frame. play_episode now runs flat out, for training;
+    the browser view drives play_frame itself so it can pace the game.
+  - The delay argument on Agent.play_episode. The pause now lives only in
+    GameRunner, where it is actually watched.
+  - The unused game_seed argument on Trainer.evaluate - every candidate uses
+    the trainer's own seed.
+  - __repr__ on Piece and TetrisGame, which nothing called. Connectome keeps
+    its own: it is printed on load to confirm which brain was opened.
+  - The serve --host flag. The viewer is loopback only (web.HOST).
+
+
+9. KNOWN LIMITATIONS OF THIS ITERATION
 ---------------------------------------
   - Training uses one fixed piece sequence for the whole run, so the agent can
     overfit to it. This is on purpose: with a fresh sequence per generation the

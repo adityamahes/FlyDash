@@ -1,5 +1,6 @@
 """Tests for TetriFLY. Run with: python -m unittest test_tetrifly -v"""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ import torch
 
 from tetrifly import Action, Agent, Connectome, Piece, SpikingNetwork, TetrisGame, Trainer
 from tetrifly.tetris import _rotate
+from tetrifly.web import GameRunner
 
 
 def make_neurons():
@@ -620,6 +622,62 @@ class TestTrainer(unittest.TestCase):
     def test_non_positive_pair_count_is_rejected(self):
         with self.assertRaises(ValueError):
             Trainer(Agent(Connectome.synthetic()), pairs=0)
+
+
+class TestWebSnapshot(unittest.TestCase):
+    """The browser view is only as good as the snapshot it polls."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.connectome = Connectome.synthetic()
+
+    def runner(self):
+        return GameRunner(Agent(self.connectome), delay=0, max_frames=10)
+
+    def test_snapshot_is_json_serialisable(self):
+        # The handler calls json.dumps on this; a stray tensor would 500.
+        json.dumps(self.runner().snapshot())
+
+    def test_snapshot_describes_the_board_at_full_size(self):
+        state = self.runner().snapshot()
+
+        self.assertEqual(len(state['locked']), TetrisGame.HEIGHT)
+        self.assertEqual(len(state['locked'][0]), TetrisGame.WIDTH)
+
+    def test_falling_cells_are_on_the_board(self):
+        state = self.runner().snapshot()
+
+        for row, col in state['falling']:
+            self.assertTrue(0 <= row < state['height'])
+            self.assertTrue(0 <= col < state['width'])
+
+    def test_snapshot_reports_one_logit_per_action(self):
+        state = self.runner().snapshot()
+
+        self.assertEqual(len(state['logits']), len(Action))
+        self.assertEqual(state['action_names'], [a.name for a in Action])
+
+    def test_the_falsy_left_action_still_reports(self):
+        # Action.LEFT is 0, so a truthiness check would drop it entirely.
+        runner = self.runner()
+
+        runner._publish(TetrisGame(seed=0), Action.LEFT, frame=1, episode=1)
+        state = runner.snapshot()
+
+        self.assertEqual(state['action'], 'LEFT')
+        self.assertEqual(state['action_index'], 0)
+
+    def test_publishing_a_frame_updates_the_snapshot(self):
+        runner = self.runner()
+        game = TetrisGame(seed=0)
+        action = runner.agent.play_frame(game)
+
+        runner._publish(game, action, frame=1, episode=1)
+        state = runner.snapshot()
+
+        self.assertEqual(state['frame'], 1)
+        self.assertEqual(state['action'], action.name)
+        self.assertEqual(state['action_index'], int(action))
 
 
 if __name__ == '__main__':
