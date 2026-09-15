@@ -48,6 +48,9 @@ class Connectome:
             of neuron i pushes the membrane potential of neuron j: positive
             excites, negative inhibits. Row = sender, column = receiver.
         types: Cell type name per matrix index.
+        positions: Optional (N, 3) soma coordinates in nanometres, one row per
+            matrix index, or None. NaN for a cell type neuPrint has no soma
+            location for. Used only for drawing; the simulation ignores it.
         visual: Indices of the visual neurons, where the encoder injects.
         motor: Indices of the descending neurons, which the decoder reads.
         reward: Indices of the dopamine neurons, where reward is injected.
@@ -75,9 +78,16 @@ class Connectome:
     #: up to 1.0, which is exactly the firing threshold.
     WEIGHT_PER_SYNAPSE = 0.1
 
-    #: Total excitatory input a neuron gets when all of its senders fire at
-    #: once, in units of the firing threshold. See _normalise_input.
+    #: Net input a neuron gets when all of its senders fire at once, in units
+    #: of the firing threshold. Net, not excitatory: see _normalise_input.
     TARGET_INPUT = 2.0
+
+    #: Ceiling on the gain _normalise_input may apply. A neuron whose
+    #: excitation and inhibition nearly cancel has a net drive near zero, and
+    #: asking for TARGET_INPUT would multiply its synapses by millions. Those
+    #: neurons stay under-driven instead, which is the honest outcome: the
+    #: anatomy really does leave them balanced.
+    MAX_GAIN = 20.0
 
     # --- cell types of the populations the agent uses ---
     VISUAL_TYPES = r'^(?:R[1-6]|Mi1)'    # photoreceptors and early medulla
@@ -221,21 +231,42 @@ class Connectome:
         relative strength and the sign of every synapse it receives untouched;
         only the overall gain of its input is set to a common value.
 
+        The total that gets equalised is the NET one, excitation plus
+        inhibition, not excitation alone. Normalising excitation by itself
+        looks right and is not: 37% of the synapses here are inhibitory, so
+        setting excitation to 2.0 leaves a median net drive of 0.52 and an
+        all-neuron mean of 0.007 - below the firing threshold of 1.0 even if
+        every presynaptic partner fired at once. Nothing could reach threshold
+        from recurrent input at all, and the descending neurons the decoder
+        reads sat permanently just under it, firing 2 out of 862. That was
+        invisible while a bug made every synapse excitatory, because then
+        excitation and net were the same number.
+
+        Neurons whose inhibition outweighs their excitation (29.6% of this
+        connectome) have no positive gain that would reach threshold. They are
+        left as they are and stay quiet unless something injects current
+        directly.
+
         Args:
             matrix: Sparse (N, N) matrix in [sender, receiver] orientation.
 
         Returns:
-            A matrix of the same shape and sparsity. Neurons with no excitatory
-            input are left alone.
+            A matrix of the same shape and sparsity.
+
+        Note:
+            Not idempotent. For a neuron whose gain hit MAX_GAIN the first
+            pass leaves net drive short of TARGET_INPUT, so a second pass
+            scales it again. Re-running this on an already normalised matrix
+            is therefore only approximately the same as building from raw
+            synapse counts, and differs exactly on the gain-capped neurons.
         """
-        senders, receivers = matrix.indices()
+        receivers = matrix.indices()[1]
         values = matrix.values()
         size = matrix.shape[0]
 
-        excitation = torch.zeros(size).index_add_(0, receivers, values.clamp(min=0))
-        scale = torch.where(excitation > 0,
-                            cls.TARGET_INPUT / excitation.clamp(min=1e-6),
-                            torch.ones(size))
+        net = torch.zeros(size).index_add_(0, receivers, values)
+        gain = (cls.TARGET_INPUT / net.clamp(min=1e-6)).clamp(max=cls.MAX_GAIN)
+        scale = torch.where(net > 0, gain, torch.ones(size))
 
         return torch.sparse_coo_tensor(matrix.indices(), values * scale[receivers],
                                        size=matrix.shape).coalesce()
@@ -308,7 +339,7 @@ class Connectome:
 
         torch.save({'matrix': self.matrix, 'types': self.types.tolist(),
                     'visual': self.visual, 'motor': self.motor,
-                    'reward': self.reward}, path)
+                    'reward': self.reward, 'positions': self.positions}, path)
 
     @classmethod
     def load(cls, path):
@@ -327,6 +358,8 @@ class Connectome:
         connectome.visual = data['visual']
         connectome.motor = data['motor']
         connectome.reward = data['reward']
+        # Optional, and absent from files built before positions were stored.
+        connectome.positions = data.get('positions')
         return connectome
 
 

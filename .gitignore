@@ -30,3 +30,6 @@ Thumbs.db
 # Cached connectome
 data/
 *.pt
+
+# Trained weights (regenerate with: python main.py train)
+data/parameters.pt

@@ -141,6 +141,11 @@ class TetrisGame:
         piece: The piece currently under the agent's control.
         lines: Rows cleared so far this episode - the score.
         over: Whether the episode has ended by topping out.
+        applied: Whether the last action actually moved the piece, or was
+            rejected as illegal and silently ignored.
+        locked: Whether a piece came to rest on the last frame.
+        landing_height: Rows above the floor where that piece came to rest.
+        eroded_cells: Cells of that piece which a line clear consumed.
     """
 
     WIDTH = 10
@@ -168,6 +173,7 @@ class TetrisGame:
         self.locked = False
         self.landing_height = 0
         self.eroded_cells = 0
+        self.applied = True
         self.piece = self._spawn()
 
     # ------------------------------------------------------------------
@@ -244,7 +250,11 @@ class TetrisGame:
         else:
             candidate = self._dropped(self.piece)
 
-        if self._fits(candidate):
+        # Recorded so the reward can charge for an action that did nothing:
+        # walking into a wall or a rotation that does not fit is ignored here,
+        # and without this the agent has no way to be told it wasted a frame.
+        self.applied = self._fits(candidate)
+        if self.applied:
             self.piece = candidate
 
         # One row of gravity always follows. After a DROP the piece is already

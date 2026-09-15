@@ -91,59 +91,82 @@ class Decoder(nn.Module):
 
 
 class Reward:
-    """Scores what one frame did to the board.
+    """Scores what one frame did, on a scale of consequence.
 
     This is the objective the trainer climbs *and* the teaching signal the
     dopamine neurons receive: one number, so the brain is told the same thing
     selection acts on.
 
-    Why not cleared lines alone: an untrained agent never clears one, so every
-    candidate scores identically and evolution has a flat landscape. The old
-    objective patched around that with ``200 * lines + frames``, but ``frames``
-    barely says anything - gravity moves one row per frame, so a board one row
-    from a clear scored the same as a board full of holes.
+    Two properties it is built for:
 
-    Three terms, each with a job:
+    **Something is scored on every frame.** An earlier version only paid out
+    when a piece came to rest, which with a falling piece is one frame in
+    nineteen - the brain received a flat zero the rest of the time and had
+    nothing to associate with anything. Now a frame that walks into a wall is
+    punished and a frame that does something legal is credited, however
+    slightly, so the signal is continuous.
 
-    ``PLACEMENT``
-        Paid per piece that comes to rest. This is the progress signal, and it
-        works because more pieces fit before topping out *only* if they are
-        stacked well. It is per placement rather than per frame on purpose:
-        with a drop action available, paying per frame would reward an agent
-        that drifts sideways forever and never commits a piece.
+    **Consequences are graded across four orders of magnitude.** A wasted
+    frame costs 2, burying a hole costs 5, coming to rest costs or earns tens,
+    clearing four rows at once earns 8000. Those ratios are the design: they
+    are what makes a clear worth the dozen careful placements it takes to set
+    up, rather than something to be traded away for a tidier board.
 
-    board badness
-        Holes, wells, bumpiness and height, charged as the *change* they
-        undergo, not their absolute size. That matters: charging the absolute
-        badness of every placement makes a long good episode score worse than
-        a short bad one simply for having more placements in it. As a
-        difference the terms telescope over an episode to the badness of the
-        final board, so tidiness is measured once however long the agent
-        survives. This is potential-based shaping (Ng, Harada & Russell 1999),
-        which is why it can be added without changing which policy is best.
-
-    ``LINE`` and ``GAME_OVER``
-        The actual goal and the actual failure. Squared, so four rows at once
-        is worth sixteen singles, as in real Tetris scoring.
+    The board terms are charged as the *change* they undergo, not their
+    absolute size. Charging absolute badness per placement made a long good
+    episode score worse than a short bad one purely for containing more
+    placements - a lookahead policy that cleared a line over 34 pieces scored
+    -3700 against always-drop's -870. As a difference they telescope over the
+    episode to the badness of the final board, so tidiness is measured once
+    however long the agent survives. This is potential-based shaping (Ng,
+    Harada & Russell 1999), which is why it can be added without changing
+    which policy is best.
     """
 
-    #: Per piece that comes to rest. The progress signal.
+    # --- every frame ---
+
+    #: An action that actually moved or rotated the piece. Small and positive,
+    #: so there is something to feel on an ordinary frame.
+    LEGAL = 0.2
+
+    #: An action the rules rejected - into a wall, or a rotation that does not
+    #: fit. Ten times the size of LEGAL: a wasted frame is a real cost, and
+    #: this is the most frequent mistake available to an untrained policy.
+    ILLEGAL = -2.0
+
+    # --- when a piece comes to rest ---
+
+    #: Paid per piece placed. The progress signal: more pieces fit before
+    #: topping out only if they are stacked well. Per placement rather than
+    #: per frame, because with a drop action a per-frame bonus would reward an
+    #: agent that drifts sideways forever and never commits.
     PLACEMENT = 10.0
 
-    #: Cleared rows, squared, so simultaneous clears are worth far more.
+    #: Per row above the floor the piece came to rest. Prefers filling the
+    #: bottom first, and makes a drop into a deep gap better than one onto a
+    #: peak.
+    LANDING = -1.0
+
+    # --- when rows clear ---
+
+    #: Per cleared row, multiplied by the number cleared: one row earns 500,
+    #: four at once earn 8000, as in real Tetris scoring.
     LINE = 500.0
 
-    #: Cells of the just-placed piece that a clear consumed. Credits the piece
-    #: that completed the row, not just the board that resulted.
+    #: Per cell of the just-placed piece that a clear consumed. Credits the
+    #: piece that completed the row, not merely the board that resulted.
     ERODED = 20.0
 
-    #: Topping out, charged once.
-    GAME_OVER = 200.0
+    # --- once ---
 
-    # --- board badness, charged as a change ---
+    #: Topping out. Larger than a whole episode of LEGAL frames, so stalling
+    #: is never a way to avoid it.
+    GAME_OVER = -200.0
+
+    # --- board badness, charged as the change it undergoes ---
 
     #: Empty cells with something filled above them. The expensive mistake:
-    #: nothing but a clear above can free them, so this is weighted hardest.
+    #: only a clear above can free them, so this is the heaviest board term.
     HOLES = 5.0
 
     #: One-wide gaps, which only an I piece can fill.
@@ -158,7 +181,7 @@ class Reward:
     AGGREGATE = 0.2
 
     def __init__(self):
-        """Start with the badness of an empty board."""
+        """Start from the badness of an empty board."""
         self.reset()
 
     def reset(self):
@@ -192,20 +215,21 @@ class Reward:
         Returns:
             The scalar reward for this frame. Negative is punishment.
         """
-        score = 0.0
+        score = self.LEGAL if game.applied else self.ILLEGAL
 
         # The stack only changes on the frame a piece locks, so that is the
         # only frame with a placement to judge.
         if game.locked:
             current = self.badness(game)
             score += (self.PLACEMENT
+                      + self.LANDING * game.landing_height
                       + self.LINE * cleared ** 2
                       + self.ERODED * game.eroded_cells
                       - (current - self.previous))
             self.previous = current
 
         if over:
-            score -= self.GAME_OVER
+            score += self.GAME_OVER
         return score
 
 
@@ -229,6 +253,8 @@ class Agent:
         decoder: Trainable motor rates -> action logits mapping.
         rates: Firing rates from the most recent frame, kept for inspection.
         logits: Action logits from the most recent frame.
+        reward: The reward rule's verdict on the most recent frame.
+        dopamine: The current that reward became at the dopamine neurons.
     """
 
     #: Timesteps simulated per Tetris frame. The timestep is far shorter than

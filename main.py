@@ -15,10 +15,15 @@ import argparse
 import sys
 from pathlib import Path
 
+import torch
+
 from tetrifly import Agent, Connectome, Trainer, web
 
 # Where build writes the cached brain, and where serve and train look for it.
 CONNECTOME_PATH = 'data/connectome.pt'
+
+# Where train writes the tuned encoder and decoder, and serve reads them from.
+PARAMETERS_PATH = 'data/parameters.pt'
 
 
 def load_connectome(path):
@@ -56,7 +61,17 @@ def serve(args):
     connectome = load_connectome(args.connectome)
     print(connectome)
 
-    web.serve(Agent(connectome), port=args.port, delay=args.delay,
+    agent = Agent(connectome)
+    if args.parameters:
+        if not Path(args.parameters).exists():
+            raise SystemExit(f'No parameters at {args.parameters}. Train first '
+                             f'with: python main.py train')
+        agent.set_parameters(torch.load(args.parameters, weights_only=False))
+        print(f'Loaded trained parameters from {args.parameters}')
+    else:
+        print('No --parameters given; playing with untrained random weights.')
+
+    web.serve(agent, port=args.port, delay=args.delay,
               max_frames=args.frames, seed=args.seed)
 
 
@@ -74,7 +89,13 @@ def train(args):
         print(f'generation {generation:3d} | fitness {fitness:8.1f} | '
               f'lines {lines:3d} | frames {frames:4d}')
 
-    trainer.train(args.generations, on_generation=report)
+    history = trainer.train(args.generations, on_generation=report)
+
+    torch.save(agent.get_parameters(), args.output)
+    best = max(fitness for fitness, _, _ in history)
+    print(f'Best fitness {best:.1f} over {args.generations} generations.')
+    print(f'Saved parameters to {args.output}')
+    print(f'Watch them play with: python main.py serve --parameters {args.output}')
 
 
 def main(argv=None):
@@ -99,12 +120,17 @@ def main(argv=None):
     serve_parser.add_argument('--port', type=int, default=web.PORT)
     serve_parser.add_argument('--delay', type=float, default=web.GameRunner.DELAY,
                               help='Seconds to pause after each frame.')
+    serve_parser.add_argument('--parameters',
+                              help='Trained parameters from train (default: '
+                                   'untrained, random weights).')
     serve_parser.set_defaults(run=serve)
 
     train_parser = commands.add_parser('train', help='Train the encoder and decoder.')
     train_parser.add_argument('--generations', type=int, default=10)
     train_parser.add_argument('--pairs', type=int, default=Trainer.PAIRS,
                               help='Perturbation pairs per generation.')
+    train_parser.add_argument('--output', default=PARAMETERS_PATH,
+                              help='Where to save the trained parameters.')
     train_parser.set_defaults(run=train)
 
     for subparser in (serve_parser, train_parser):
