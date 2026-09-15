@@ -88,8 +88,9 @@ multiplies against ~166,700 neurons. Start with `--delay 0` and a low
 The browser view draws the board as a grid of square cells (styled after
 [robertrypula/simple-tetris](https://github.com/robertrypula/simple-tetris)) and,
 alongside it, what the brain is doing: the size of each neuron population, how
-hard the motor neurons are firing, and the four decoder logits as bars with the
-winning one highlighted. Green cells are locked; amber is the piece the brain
+hard the motor neurons are firing, the five decoder logits as bars with the
+winning one highlighted, and the reward rule's verdict on the last frame
+alongside the dopamine current it became. Green cells are locked; amber is the piece the brain
 still controls.
 
 ## The code
@@ -102,6 +103,7 @@ One class per concept:
 | | `SpikingNetwork` | leaky integrate-and-fire simulation over that matrix |
 | `tetrifly/tetris.py` | `Piece`, `TetrisGame` | the game |
 | `tetrifly/agent.py` | `Encoder`, `Decoder` | the two trainable layers |
+| | `Reward` | board outcome -> one scalar, for brain and trainer alike |
 | | `Agent` | one frame: see, simulate, act, be rewarded |
 | | `Trainer` | evolutionary strategies |
 | `tetrifly/web.py` | `GameRunner` | plays in a thread, publishes a snapshot |
@@ -163,5 +165,6 @@ strategies over ~40,000 parameters needs far more episodes than a handful of
 generations, and each candidate is scored on a single noisy episode.
 
 See `SIMPLIFICATIONS.txt` for what this first iteration deliberately leaves out
-(mushroom-body plasticity, next-piece preview, hold, drops, wall kicks, scoring
-tiers, graded reward) and what it would take to add each back.
+(mushroom-body plasticity, next-piece preview, hold, wall kicks, scoring tiers)
+and what it would take to add each back. Hard drop and a graded reward have
+since been added; see `Action.DROP` and `Reward`.

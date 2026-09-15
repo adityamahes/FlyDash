@@ -1,15 +1,18 @@
 """The agent: Tetris wired into the fly brain, and the trainer that tunes it.
 
-Four classes:
+Five classes:
 
 ``Encoder``   board -> current injected at the visual neurons (trainable)
-``Decoder``   motor neuron firing rates -> four action logits (trainable)
+``Decoder``   motor neuron firing rates -> five action logits (trainable)
+``Reward``    board outcome -> one scalar, for both the brain and the trainer
 ``Agent``     runs one frame: see, simulate, act, be rewarded
 ``Trainer``   evolutionary strategies over the encoder and decoder
 
 The encoder and decoder are the only trainable parts. The connectome between
-them is frozen anatomy, and the reward injection is a fixed rule.
+them is frozen anatomy, and the reward rule is fixed.
 """
+
+import math
 
 import torch
 from torch import nn
@@ -58,7 +61,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    """Learns to read descending-neuron activity as one of four controls.
+    """Learns to read descending-neuron activity as one of five controls.
 
     The chosen action is the argmax of the logits, so only their ordering
     matters.
@@ -82,9 +85,128 @@ class Decoder(nn.Module):
                 subset is read.
 
         Returns:
-            A (4,) tensor of logits, ordered to match Action.
+            A (len(Action),) tensor of logits, ordered to match Action.
         """
         return self.layer(rates[self.motor])
+
+
+class Reward:
+    """Scores what one frame did to the board.
+
+    This is the objective the trainer climbs *and* the teaching signal the
+    dopamine neurons receive: one number, so the brain is told the same thing
+    selection acts on.
+
+    Why not cleared lines alone: an untrained agent never clears one, so every
+    candidate scores identically and evolution has a flat landscape. The old
+    objective patched around that with ``200 * lines + frames``, but ``frames``
+    barely says anything - gravity moves one row per frame, so a board one row
+    from a clear scored the same as a board full of holes.
+
+    Three terms, each with a job:
+
+    ``PLACEMENT``
+        Paid per piece that comes to rest. This is the progress signal, and it
+        works because more pieces fit before topping out *only* if they are
+        stacked well. It is per placement rather than per frame on purpose:
+        with a drop action available, paying per frame would reward an agent
+        that drifts sideways forever and never commits a piece.
+
+    board badness
+        Holes, wells, bumpiness and height, charged as the *change* they
+        undergo, not their absolute size. That matters: charging the absolute
+        badness of every placement makes a long good episode score worse than
+        a short bad one simply for having more placements in it. As a
+        difference the terms telescope over an episode to the badness of the
+        final board, so tidiness is measured once however long the agent
+        survives. This is potential-based shaping (Ng, Harada & Russell 1999),
+        which is why it can be added without changing which policy is best.
+
+    ``LINE`` and ``GAME_OVER``
+        The actual goal and the actual failure. Squared, so four rows at once
+        is worth sixteen singles, as in real Tetris scoring.
+    """
+
+    #: Per piece that comes to rest. The progress signal.
+    PLACEMENT = 10.0
+
+    #: Cleared rows, squared, so simultaneous clears are worth far more.
+    LINE = 500.0
+
+    #: Cells of the just-placed piece that a clear consumed. Credits the piece
+    #: that completed the row, not just the board that resulted.
+    ERODED = 20.0
+
+    #: Topping out, charged once.
+    GAME_OVER = 200.0
+
+    # --- board badness, charged as a change ---
+
+    #: Empty cells with something filled above them. The expensive mistake:
+    #: nothing but a clear above can free them, so this is weighted hardest.
+    HOLES = 5.0
+
+    #: One-wide gaps, which only an I piece can fill.
+    WELLS = 1.0
+
+    #: Height difference between neighbouring columns. A flat surface accepts
+    #: whatever piece comes next; a jagged one does not.
+    BUMPINESS = 0.5
+
+    #: Total stack height. Weak on its own - height is only bad because it
+    #: runs out of room - but it discourages building upward early.
+    AGGREGATE = 0.2
+
+    def __init__(self):
+        """Start with the badness of an empty board."""
+        self.reset()
+
+    def reset(self):
+        """Forget the previous board, as at the start of an episode."""
+        self.previous = 0.0
+
+    def badness(self, game):
+        """Score how awkward a board is to keep playing on.
+
+        Args:
+            game: The game whose board to judge.
+
+        Returns:
+            A non-negative number; 0 is an empty board.
+        """
+        features = game.features()
+        return (self.HOLES * features['holes']
+                + self.WELLS * features['wells']
+                + self.BUMPINESS * features['bumpiness']
+                + self.AGGREGATE * features['aggregate_height'])
+
+    def __call__(self, game, cleared, over):
+        """Score one frame.
+
+        Args:
+            game: The game, already stepped. Its placement attributes describe
+                the piece that just landed, if one did.
+            cleared: Rows cleared this frame.
+            over: Whether the game ended this frame.
+
+        Returns:
+            The scalar reward for this frame. Negative is punishment.
+        """
+        score = 0.0
+
+        # The stack only changes on the frame a piece locks, so that is the
+        # only frame with a placement to judge.
+        if game.locked:
+            current = self.badness(game)
+            score += (self.PLACEMENT
+                      + self.LINE * cleared ** 2
+                      + self.ERODED * game.eroded_cells
+                      - (current - self.previous))
+            self.previous = current
+
+        if over:
+            score -= self.GAME_OVER
+        return score
 
 
 class Agent:
@@ -95,7 +217,7 @@ class Agent:
     1. Render the board.
     2. Encode it into current at the visual neurons.
     3. Simulate the connectome for many timesteps under that steady input.
-    4. Decode the motor firing rates into one of four controls.
+    4. Decode the motor firing rates into one of five controls.
     5. Apply that control to the game.
     6. Turn the outcome into current at the dopamine neurons and simulate a few
        more timesteps, so the teaching signal reaches the brain.
@@ -117,12 +239,17 @@ class Agent:
     #: signal actually propagates.
     REWARD_TIMESTEPS = 5
 
-    #: Fixed current injected at the dopamine neurons. Not learned: real
-    #: dopamine is an unconditioned "that was good / bad" teaching signal, so it
-    #: stays as external ground truth. Large enough to drive those neurons
-    #: regardless of what the rest of the brain is doing.
-    LINE_REWARD = 2.0
-    GAME_OVER_PUNISHMENT = -2.0
+    #: Current injected at the dopamine neurons when the reward saturates.
+    #: Not learned: real dopamine is an unconditioned "that was good / bad"
+    #: teaching signal, so it stays external ground truth. Large enough to
+    #: drive those neurons regardless of what the rest of the brain is doing.
+    DOPAMINE_CURRENT = 2.0
+
+    #: Reward magnitude that maps to tanh(1), i.e. about 76% of saturation.
+    #: The reward itself ranges over hundreds, and a current of 500 against a
+    #: firing threshold of 1.0 would say nothing except "enormous", so it is
+    #: squashed. Real dopamine neurons saturate the same way.
+    DOPAMINE_SCALE = 100.0
 
     def __init__(self, connectome):
         """Build an agent around one connectome.
@@ -134,12 +261,16 @@ class Agent:
         self.network = SpikingNetwork(connectome)
         self.encoder = Encoder(connectome)
         self.decoder = Decoder(connectome)
+        self.reward_rule = Reward()
         self.rates = torch.zeros(len(connectome))
         self.logits = torch.zeros(len(Action))
+        self.reward = 0.0
+        self.dopamine = 0.0
 
     def reset(self):
-        """Clear the simulation, as at the start of an episode."""
+        """Clear the simulation and the reward history, as between episodes."""
         self.network.reset()
+        self.reward_rule.reset()
 
     def play_frame(self, game):
         """Perceive, act, and be taught, for a single frame.
@@ -156,25 +287,34 @@ class Agent:
             self.logits = self.decoder(self.rates)
 
         action = Action(int(self.logits.argmax()))
-        lines, over = game.step(action)
-        self._inject_reward(lines, over)
+        cleared, over = game.step(action)
+
+        self.reward = self.reward_rule(game, cleared, over)
+        self.dopamine = self._inject_reward(self.reward)
         return action
 
-    def _inject_reward(self, lines, over):
-        """Deliver the teaching signal and let it propagate.
+    def _inject_reward(self, reward):
+        """Deliver the teaching signal to the dopamine neurons.
+
+        The scalar is squashed onto a bounded current and applied to every
+        dopamine neuron at once, then simulated for a few more timesteps so it
+        actually reaches the rest of the brain before the next frame is
+        perceived. Because the network is not reset between frames, that
+        activity is still present when the next board arrives - which is the
+        only route by which reward reaches behaviour at all.
 
         Args:
-            lines: Rows cleared this frame.
-            over: Whether the game ended this frame.
+            reward: This frame's scalar reward. Negative is punishment.
+
+        Returns:
+            The current that was injected, for inspection.
         """
-        amount = self.LINE_REWARD * lines
-        if over:
-            amount += self.GAME_OVER_PUNISHMENT
+        amount = self.DOPAMINE_CURRENT * math.tanh(reward / self.DOPAMINE_SCALE)
 
         current = torch.zeros(len(self.connectome))
-        if amount:
-            current[self.connectome.reward] = amount
+        current[self.connectome.reward] = amount
         self.network.run(current, self.REWARD_TIMESTEPS)
+        return amount
 
     def play_episode(self, game, max_frames=500):
         """Play until the game ends or the frame budget runs out.
@@ -188,18 +328,20 @@ class Agent:
                 terminates.
 
         Returns:
-            (lines_cleared, frames_played) for the episode.
+            (total_reward, lines_cleared, frames_played) for the episode.
         """
         self.reset()
 
+        total = 0.0
         frames = 0
         for _ in range(max_frames):
             self.play_frame(game)
+            total += self.reward
             frames += 1
             if game.over:
                 break
 
-        return game.lines, frames
+        return total, game.lines, frames
 
     # ------------------------------------------------------------------
     # Parameters, as one flat vector for the trainer
@@ -267,14 +409,6 @@ class Trainer:
     #: Frame budget per episode.
     MAX_FRAMES = 500
 
-    #: Weight on cleared lines in the fitness. Surviving frames are worth 1
-    #: each. Cleared lines alone would be useless as a training signal: an
-    #: untrained policy never clears one, so every candidate would score zero
-    #: and there would be nothing to climb. Survival time gives a gradient from
-    #: the first generation, and this weight keeps a cleared line worth far more
-    #: than the frames it took.
-    LINE_WEIGHT = 200.0
-
     def __init__(self, agent, pairs=PAIRS, sigma=SIGMA,
                  learning_rate=LEARNING_RATE, max_frames=MAX_FRAMES, seed=0):
         """Set up a training run.
@@ -311,12 +445,13 @@ class Trainer:
             vector: Candidate encoder and decoder parameters.
 
         Returns:
-            (fitness, lines_cleared, frames_played).
+            (fitness, lines_cleared, frames_played). Fitness is the episode's
+            total reward, so :class:`Reward` alone decides what "better" means
+            - the trainer holds no scoring weights of its own.
         """
         self.agent.set_parameters(vector)
-        lines, frames = self.agent.play_episode(TetrisGame(seed=self.seed),
-                                                max_frames=self.max_frames)
-        return self.LINE_WEIGHT * lines + frames, lines, frames
+        return self.agent.play_episode(TetrisGame(seed=self.seed),
+                                       max_frames=self.max_frames)
 
     def train(self, generations, on_generation=None):
         """Run evolutionary strategies for a number of generations.

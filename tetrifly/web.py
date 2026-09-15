@@ -104,6 +104,10 @@ PAGE = """<!doctype html>
       <dt>frame</dt><dd id="frame">-</dd>
       <dt>lines cleared</dt><dd id="lines">-</dd>
       <dt>action</dt><dd id="action">-</dd>
+      <dt>reward</dt><dd id="reward">-</dd>
+      <dt>dopamine</dt><dd id="dopamine">-</dd>
+      <dt>holes</dt><dd id="holes">-</dd>
+      <dt>bumpiness</dt><dd id="bumpiness">-</dd>
       <dt>status</dt><dd id="over">-</dd>
     </dl>
 
@@ -176,6 +180,10 @@ function draw(state) {
   document.getElementById('frame').textContent = state.frame;
   document.getElementById('lines').textContent = state.lines;
   document.getElementById('action').textContent = state.action || '-';
+  document.getElementById('reward').textContent = state.reward_signal;
+  document.getElementById('dopamine').textContent = state.dopamine;
+  document.getElementById('holes').textContent = state.board.holes;
+  document.getElementById('bumpiness').textContent = state.board.bumpiness;
   document.getElementById('over').textContent = state.over ? 'topped out' : 'playing';
 
   document.getElementById('neurons').textContent = state.neurons.toLocaleString();
@@ -312,6 +320,11 @@ class GameRunner:
             'action_names': [a.name for a in Action],
             'logits': [round(v, 4) for v in self.agent.logits.tolist()],
             'motor_rate': round(float(motor_rates.mean()), 4),
+            # The reward rule's verdict on the last frame, and the current it
+            # became at the dopamine neurons.
+            'reward_signal': round(float(self.agent.reward), 2),
+            'dopamine': round(float(self.agent.dopamine), 4),
+            'board': game.features(),
             'neurons': len(connectome),
             'connections': connectome.matrix._nnz(),
             'visual': len(connectome.visual),

@@ -30,18 +30,24 @@ Removed with it:
 
 2. TETRIS RULES
 ---------------
-Left out, because the agent has only four controls (left, right, rotate left,
-rotate right) and the first iteration should be easy to reason about:
+Left out, because the agent has only five controls (left, right, rotate left,
+rotate right, drop) and the first iteration should be easy to reason about:
 
   - Next-piece preview. The agent cannot see what is coming.
   - Hold slot / piece swapping.
-  - Soft drop and hard drop. Gravity is exactly one row per frame, always.
+  - Soft drop. Hard drop has since been ADDED as Action.DROP: without it the
+    agent could not choose when a piece landed, only nudge it while gravity
+    decided, so every piece cost the same ~19 frames and placement quality was
+    nearly invisible in how long an episode ran. Gravity is still exactly one
+    row per frame otherwise.
   - Wall kicks (SRS). A rotation that does not fit is simply ignored.
   - Levels, speed-up, gravity that accelerates.
   - 7-bag randomiser. Pieces are now drawn uniformly at random, so the same
     piece can repeat and a needed piece can be starved indefinitely.
-  - Multi-line score bonus (100 / 300 / 500 / 800 for 1-4 rows). The score is
-    now simply the number of rows cleared; a Tetris is worth four singles.
+  - Multi-line score bonus (100 / 300 / 500 / 800 for 1-4 rows). The reported
+    score is still simply the number of rows cleared, but the REWARD now
+    squares simultaneous clears, so a Tetris is worth sixteen singles to the
+    trainer even though it still shows as 4 lines.
   - Lock delay, ghost piece, T-spin recognition, scoring for drops.
 
 Cost to restore: a preview is one extra field on TetrisGame plus more inputs on
