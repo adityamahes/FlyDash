@@ -13,11 +13,16 @@ Two classes live here:
 """
 
 import os
-import random
 from pathlib import Path
 
 import pandas as pd
 import torch
+
+try:
+    from .local_config import TOKEN as _LOCAL_TOKEN
+except ImportError:
+    # local_config.py is gitignored, so a fresh clone will not have it.
+    _LOCAL_TOKEN = ''
 
 
 class Connectome:
@@ -43,6 +48,9 @@ class Connectome:
             of neuron i pushes the membrane potential of neuron j: positive
             excites, negative inhibits. Row = sender, column = receiver.
         types: Cell type name per matrix index.
+        positions: Optional (N, 3) soma coordinates in nanometres, one row per
+            matrix index, or None. NaN for a cell type neuPrint has no soma
+            location for. Used only for drawing; the simulation ignores it.
         visual: Indices of the visual neurons, where the encoder injects.
         motor: Indices of the descending neurons, which the decoder reads.
         reward: Indices of the dopamine neurons, where reward is injected.
@@ -51,7 +59,12 @@ class Connectome:
     # --- data source ---
     SERVER = 'neuprint.janelia.org'
     DATASET = 'male-cns:v1.0'
+
+    # Auth token, needed only by ``from_neuprint``. The first non-empty of
+    # these wins: the ``token=...`` argument, then $NEUPRINT_TOKEN, then
+    # TOKEN, which comes from the gitignored local_config.py.
     TOKEN_ENV_VAR = 'NEUPRINT_TOKEN'
+    TOKEN = _LOCAL_TOKEN
 
     # --- synapse signs ---
     # Neuromodulators (dopamine, octopamine, serotonin) are deliberately absent:
@@ -65,9 +78,16 @@ class Connectome:
     #: up to 1.0, which is exactly the firing threshold.
     WEIGHT_PER_SYNAPSE = 0.1
 
-    #: Total excitatory input a neuron gets when all of its senders fire at
-    #: once, in units of the firing threshold. See _normalise_input.
+    #: Net input a neuron gets when all of its senders fire at once, in units
+    #: of the firing threshold. Net, not excitatory: see _normalise_input.
     TARGET_INPUT = 2.0
+
+    #: Ceiling on the gain _normalise_input may apply. A neuron whose
+    #: excitation and inhibition nearly cancel has a net drive near zero, and
+    #: asking for TARGET_INPUT would multiply its synapses by millions. Those
+    #: neurons stay under-driven instead, which is the honest outcome: the
+    #: anatomy really does leave them balanced.
+    MAX_GAIN = 20.0
 
     # --- cell types of the populations the agent uses ---
     VISUAL_TYPES = r'^(?:R[1-6]|Mi1)'    # photoreceptors and early medulla
@@ -138,8 +158,13 @@ class Connectome:
             WEIGHT_PER_SYNAPSE.
         """
         transmitters = neurons['predictedNt']
-        if 'predictedNtProb' in neurons:
-            confident = (neurons['predictedNtProb'] >= cls.MIN_CONFIDENCE).fillna(False)
+        # Gate on confidence only where there is confidence data to gate on.
+        # male-cns:v1.0 ships the predictedNtProb column but leaves it null for
+        # every neuron; an all-null gate would discard every transmitter and
+        # fall the whole brain back to DEFAULT_SIGN, losing all inhibition.
+        confidence = neurons.get('predictedNtProb')
+        if confidence is not None and confidence.notna().any():
+            confident = (confidence >= cls.MIN_CONFIDENCE).fillna(False)
             transmitters = transmitters.where(confident)
 
         signs = (transmitters.str.lower()
@@ -206,21 +231,42 @@ class Connectome:
         relative strength and the sign of every synapse it receives untouched;
         only the overall gain of its input is set to a common value.
 
+        The total that gets equalised is the NET one, excitation plus
+        inhibition, not excitation alone. Normalising excitation by itself
+        looks right and is not: 37% of the synapses here are inhibitory, so
+        setting excitation to 2.0 leaves a median net drive of 0.52 and an
+        all-neuron mean of 0.007 - below the firing threshold of 1.0 even if
+        every presynaptic partner fired at once. Nothing could reach threshold
+        from recurrent input at all, and the descending neurons the decoder
+        reads sat permanently just under it, firing 2 out of 862. That was
+        invisible while a bug made every synapse excitatory, because then
+        excitation and net were the same number.
+
+        Neurons whose inhibition outweighs their excitation (29.6% of this
+        connectome) have no positive gain that would reach threshold. They are
+        left as they are and stay quiet unless something injects current
+        directly.
+
         Args:
             matrix: Sparse (N, N) matrix in [sender, receiver] orientation.
 
         Returns:
-            A matrix of the same shape and sparsity. Neurons with no excitatory
-            input are left alone.
+            A matrix of the same shape and sparsity.
+
+        Note:
+            Not idempotent. For a neuron whose gain hit MAX_GAIN the first
+            pass leaves net drive short of TARGET_INPUT, so a second pass
+            scales it again. Re-running this on an already normalised matrix
+            is therefore only approximately the same as building from raw
+            synapse counts, and differs exactly on the gain-capped neurons.
         """
-        senders, receivers = matrix.indices()
+        receivers = matrix.indices()[1]
         values = matrix.values()
         size = matrix.shape[0]
 
-        excitation = torch.zeros(size).index_add_(0, receivers, values.clamp(min=0))
-        scale = torch.where(excitation > 0,
-                            cls.TARGET_INPUT / excitation.clamp(min=1e-6),
-                            torch.ones(size))
+        net = torch.zeros(size).index_add_(0, receivers, values)
+        gain = (cls.TARGET_INPUT / net.clamp(min=1e-6)).clamp(max=cls.MAX_GAIN)
+        scale = torch.where(net > 0, gain, torch.ones(size))
 
         return torch.sparse_coo_tensor(matrix.indices(), values * scale[receivers],
                                        size=matrix.shape).coalesce()
@@ -255,7 +301,7 @@ class Connectome:
 
         Args:
             token: neuPrint auth token. Defaults to the NEUPRINT_TOKEN
-                environment variable.
+                environment variable, then to ``TOKEN`` from local_config.py.
 
         Returns:
             The built Connectome.
@@ -267,57 +313,17 @@ class Connectome:
         # installed or a network connection.
         from neuprint import Client, fetch_adjacencies, fetch_neurons
 
-        token = token or os.environ.get(cls.TOKEN_ENV_VAR)
+        token = token or os.environ.get(cls.TOKEN_ENV_VAR) or cls.TOKEN
         if not token:
-            raise RuntimeError(f'No neuPrint token. Set ${cls.TOKEN_ENV_VAR} '
-                               f'or pass token=...')
+            raise RuntimeError(f'No neuPrint token. Set TOKEN in '
+                               f'tetrifly/local_config.py, export '
+                               f'${cls.TOKEN_ENV_VAR}, or pass token=...')
 
         client = Client(cls.SERVER, dataset=cls.DATASET, token=token)
         neurons, _ = fetch_neurons(client=client)
         # fetch_adjacencies returns (neurons, connections); we want the second.
         _, connections = fetch_adjacencies(sources=neurons.bodyId,
                                            targets=neurons.bodyId, client=client)
-        return cls(neurons, connections)
-
-    @classmethod
-    def synthetic(cls, seed=0):
-        """Build a small fake brain, so the project runs with no token.
-
-        The generated tables have the same schema as neuPrint's, duplicate
-        region rows and all, and go through the ordinary build pipeline. Nothing
-        is shortcut, so a synthetic run exercises the same code as a real one.
-
-        Args:
-            seed: Seed for reproducible fixtures.
-
-        Returns:
-            A Connectome of roughly 200 neurons.
-        """
-        rng = random.Random(seed)
-        counts = {'R1-R6': 60, 'Mi1': 40, 'DNp01': 4, 'DNg100': 8,
-                  'PPL1-a': 6, 'Unknown': 82}
-        transmitters = ['acetylcholine', 'gaba', 'glutamate', 'dopamine', 'unclear']
-        regions = ['ME', 'LO', 'MB', 'CX']
-
-        body_ids, types = [], []
-        for cell_type, count in counts.items():
-            for _ in range(count):
-                body_ids.append(1_000_000 + 7 * len(body_ids))  # sparse, like real IDs
-                types.append(cell_type)
-
-        neurons = pd.DataFrame({
-            'bodyId': body_ids,
-            'type': types,
-            'predictedNt': [rng.choice(transmitters) for _ in body_ids],
-            'predictedNtProb': [rng.uniform(0.2, 1.0) for _ in body_ids],
-        })
-        rows = 8 * len(body_ids)
-        connections = pd.DataFrame({
-            'bodyId_pre': [rng.choice(body_ids) for _ in range(rows)],
-            'bodyId_post': [rng.choice(body_ids) for _ in range(rows)],
-            'roi': [rng.choice(regions) for _ in range(rows)],
-            'weight': [rng.randint(1, 30) for _ in range(rows)],
-        })
         return cls(neurons, connections)
 
     def save(self, path):
@@ -333,7 +339,7 @@ class Connectome:
 
         torch.save({'matrix': self.matrix, 'types': self.types.tolist(),
                     'visual': self.visual, 'motor': self.motor,
-                    'reward': self.reward}, path)
+                    'reward': self.reward, 'positions': self.positions}, path)
 
     @classmethod
     def load(cls, path):
@@ -352,6 +358,8 @@ class Connectome:
         connectome.visual = data['visual']
         connectome.motor = data['motor']
         connectome.reward = data['reward']
+        # Optional, and absent from files built before positions were stored.
+        connectome.positions = data.get('positions')
         return connectome
 
 
@@ -392,7 +400,15 @@ class SpikingNetwork:
         # The simulation needs total input *per receiving* neuron, a column sum
         # of the [sender, receiver] matrix. Transposing once here makes each
         # timestep an ordinary matrix-vector product.
-        self._incoming = connectome.matrix.t().coalesce()
+        #
+        # CSR, not COO: this matmul is the hot loop of the whole project, run
+        # 25 times per game frame, and torch's COO kernel chases ~25.9M
+        # unordered (row, col, value) triples through scattered memory. CSR
+        # groups them by row so the same arithmetic walks memory in order --
+        # measured at 73ms against 1264ms per step on male-cns:v1.0, for
+        # bitwise-identical potentials. Build and storage stay COO, because
+        # _normalise_input needs .indices() and .values().
+        self._incoming = connectome.matrix.t().coalesce().to_sparse_csr()
         self.reset()
 
     def reset(self):

@@ -2,33 +2,45 @@
 
 Three subcommands::
 
-    python main.py serve                               # watch it in a browser
-    python main.py train --generations 20              # optimise the agent
-    python main.py build --output data/connectome.pt   # fetch the real brain
+    python main.py build                   # fetch and cache the real brain
+    python main.py serve                   # watch it in a browser
+    python main.py train --generations 20  # optimise the agent
 
-``serve`` and ``train`` use a small synthetic brain unless ``--connectome``
-points at a file built by ``build``, so the project runs with no neuPrint token
-and no download.
+``build`` must be run once before the others: it downloads the connectome from
+neuPrint and caches it at ``CONNECTOME_PATH``, which ``serve`` and ``train``
+then load. All three work on the real fly brain; there is no synthetic mode.
 """
 
 import argparse
 import sys
+from pathlib import Path
+
+import torch
 
 from tetrifly import Agent, Connectome, Trainer, web
 
+# Where build writes the cached brain, and where serve and train look for it.
+CONNECTOME_PATH = 'data/connectome.pt'
+
+# Where train writes the tuned encoder and decoder, and serve reads them from.
+PARAMETERS_PATH = 'data/parameters.pt'
+
 
 def load_connectome(path):
-    """Load the brain a run should use.
+    """Load the cached brain a run should use.
 
     Args:
-        path: A file written by ``build``, or None for the synthetic brain.
+        path: A file previously written by ``build``.
 
     Returns:
         The Connectome to simulate.
+
+    Raises:
+        SystemExit: If no cached connectome exists at ``path``.
     """
-    if path is None:
-        print('No --connectome given; using a small synthetic brain.')
-        return Connectome.synthetic()
+    if not Path(path).exists():
+        raise SystemExit(f'No connectome at {path}. Fetch it first with: '
+                         f'python main.py build --output {path}')
 
     print(f'Loading {path} ...')
     return Connectome.load(path)
@@ -49,7 +61,17 @@ def serve(args):
     connectome = load_connectome(args.connectome)
     print(connectome)
 
-    web.serve(Agent(connectome), port=args.port, delay=args.delay,
+    agent = Agent(connectome)
+    if args.parameters:
+        if not Path(args.parameters).exists():
+            raise SystemExit(f'No parameters at {args.parameters}. Train first '
+                             f'with: python main.py train')
+        agent.set_parameters(torch.load(args.parameters, weights_only=False))
+        print(f'Loaded trained parameters from {args.parameters}')
+    else:
+        print('No --parameters given; playing with untrained random weights.')
+
+    web.serve(agent, port=args.port, delay=args.delay,
               max_frames=args.frames, seed=args.seed)
 
 
@@ -63,11 +85,24 @@ def train(args):
     print(f'Optimising {agent.get_parameters().numel():,} parameters '
           f'over {args.generations} generations.')
 
-    def report(generation, fitness, lines, frames):
-        print(f'generation {generation:3d} | fitness {fitness:8.1f} | '
-              f'lines {lines:3d} | frames {frames:4d}')
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
 
-    trainer.train(args.generations, on_generation=report)
+    def report(generation, fitness, lines, frames):
+        # Checkpoint every generation. A run is hours long and the useful
+        # thing it produces is the parameter vector, so saving only at the end
+        # means an interrupt throws all of it away.
+        torch.save(agent.get_parameters(), args.output)
+        print(f'generation {generation + 1:3d}/{args.generations} | '
+              f'fitness {fitness:9.1f} | lines {lines:3d} | frames {frames:4d} '
+              f'| saved')
+
+    history = trainer.train(args.generations, on_generation=report)
+
+    torch.save(agent.get_parameters(), args.output)
+    best = max(fitness for fitness, _, _ in history)
+    print(f'Best fitness {best:.1f} over {len(history)} generations.')
+    print(f'Saved parameters to {args.output}')
+    print(f'Watch them play with: python main.py serve --parameters {args.output}')
 
 
 def main(argv=None):
@@ -83,24 +118,31 @@ def main(argv=None):
     commands = parser.add_subparsers(dest='command', required=True)
 
     build_parser = commands.add_parser('build', help='Fetch the connectome and cache it.')
-    build_parser.add_argument('--token', help='neuPrint token (default: $NEUPRINT_TOKEN).')
-    build_parser.add_argument('--output', default='data/connectome.pt')
+    build_parser.add_argument('--token', help='neuPrint token (default: '
+                              '$NEUPRINT_TOKEN, then local_config.TOKEN).')
+    build_parser.add_argument('--output', default=CONNECTOME_PATH)
     build_parser.set_defaults(run=build)
 
     serve_parser = commands.add_parser('serve', help='Watch it play in a browser.')
     serve_parser.add_argument('--port', type=int, default=web.PORT)
     serve_parser.add_argument('--delay', type=float, default=web.GameRunner.DELAY,
                               help='Seconds to pause after each frame.')
+    serve_parser.add_argument('--parameters',
+                              help='Trained parameters from train (default: '
+                                   'untrained, random weights).')
     serve_parser.set_defaults(run=serve)
 
     train_parser = commands.add_parser('train', help='Train the encoder and decoder.')
     train_parser.add_argument('--generations', type=int, default=10)
     train_parser.add_argument('--pairs', type=int, default=Trainer.PAIRS,
                               help='Perturbation pairs per generation.')
+    train_parser.add_argument('--output', default=PARAMETERS_PATH,
+                              help='Where to save the trained parameters.')
     train_parser.set_defaults(run=train)
 
     for subparser in (serve_parser, train_parser):
-        subparser.add_argument('--connectome', help='Cached brain (default: synthetic).')
+        subparser.add_argument('--connectome', default=CONNECTOME_PATH,
+                               help='Cached brain from build.')
         subparser.add_argument('--frames', type=int, default=Trainer.MAX_FRAMES,
                                help='Frame budget per episode.')
         subparser.add_argument('--seed', type=int, default=0)

@@ -36,6 +36,7 @@ PAGE = """<!doctype html>
     --dim: rgba(126, 231, 135, 0.07);
     --locked: #7ee787;
     --falling: #ffc857;
+    --dopa: #ff79c6;
     --text: #9fb8a3;
   }
   * { box-sizing: border-box; }
@@ -48,9 +49,10 @@ PAGE = """<!doctype html>
     justify-content: center;
     padding: 24px 16px;
   }
-  main { display: flex; gap: 28px; flex-wrap: wrap; max-width: 760px; }
+  main { display: flex; gap: 26px; flex-wrap: wrap; max-width: 1120px; }
   h1 { margin: 0 0 2px; font-size: 20px; letter-spacing: 3px; color: var(--locked); }
-  .sub { margin: 0 0 18px; font-size: 12px; opacity: 0.6; }
+  .sub { margin: 0 0 6px; font-size: 12px; opacity: 0.6; }
+  .census { margin: 0 0 16px; font-size: 11px; opacity: 0.45; max-width: 260px; }
 
   #board {
     display: grid;
@@ -70,14 +72,14 @@ PAGE = """<!doctype html>
   #board div.locked { background: var(--locked); }
   #board div.falling { background: var(--falling); }
 
-  .panel { min-width: 260px; flex: 1; }
-  dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0 0 20px; }
+  .panel { min-width: 240px; flex: 1; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0 0 18px; }
   dt { opacity: 0.55; }
   dd { margin: 0; color: var(--locked); }
 
   h2 { font-size: 12px; letter-spacing: 2px; opacity: 0.55; margin: 0 0 8px;
        font-weight: normal; text-transform: uppercase; }
-  .bar { display: grid; grid-template-columns: 110px 1fr 46px;
+  .bar { display: grid; grid-template-columns: 110px 1fr 56px;
          align-items: center; gap: 8px; margin-bottom: 5px; }
   .bar span:first-child { opacity: 0.6; }
   .track { height: 8px; background: var(--dim); border-radius: 4px; overflow: hidden; }
@@ -85,8 +87,10 @@ PAGE = """<!doctype html>
   .bar.chosen span:first-child, .bar.chosen span:last-child { color: var(--falling); }
   .bar.chosen .fill { background: var(--falling); }
   .value { text-align: right; opacity: 0.8; }
-  footer { margin-top: 20px; font-size: 11px; opacity: 0.4; }
+  footer { margin-top: 18px; font-size: 11px; opacity: 0.4; }
   #over { color: var(--falling); }
+  #reward.good { color: var(--locked); }
+  #reward.bad { color: var(--falling); }
 </style>
 </head>
 <body>
@@ -94,6 +98,7 @@ PAGE = """<!doctype html>
   <div>
     <h1>TETRIFLY</h1>
     <p class="sub">a fly connectome playing tetris</p>
+    <p class="census" id="census">&nbsp;</p>
     <div id="board"></div>
   </div>
 
@@ -107,14 +112,25 @@ PAGE = """<!doctype html>
       <dt>status</dt><dd id="over">-</dd>
     </dl>
 
-    <h2>Brain</h2>
+    <h2>Teaching signal</h2>
     <dl>
-      <dt>neurons</dt><dd id="neurons">-</dd>
-      <dt>connections</dt><dd id="connections">-</dd>
-      <dt>visual</dt><dd id="visual">-</dd>
-      <dt>motor</dt><dd id="motor">-</dd>
-      <dt>dopamine</dt><dd id="reward">-</dd>
-      <dt>motor firing</dt><dd id="rate">-</dd>
+      <dt>reward this frame</dt><dd id="reward">-</dd>
+      <dt>episode total</dt><dd id="total">-</dd>
+      <dt>dopamine current</dt><dd id="dopamine">-</dd>
+    </dl>
+
+    <h2>Board quality</h2>
+    <dl>
+      <dt>holes</dt><dd id="holes">-</dd>
+      <dt>bumpiness</dt><dd id="bumpiness">-</dd>
+      <dt>stack height</dt><dd id="height">-</dd>
+      <dt>wells</dt><dd id="wells">-</dd>
+    </dl>
+
+    <h2>Firing</h2>
+    <dl>
+      <dt>motor neurons</dt><dd id="rate">-</dd>
+      <dt>brain-wide</dt><dd id="active">-</dd>
     </dl>
 
     <h2>Decoder output</h2>
@@ -128,74 +144,87 @@ PAGE = """<!doctype html>
 </main>
 
 <script>
-let cells = [];
+const boardEl = document.getElementById('board');
+let cells = [], names = null;
 
 function buildBoard(width, height) {
-  const board = document.getElementById('board');
-  board.style.gridTemplateColumns = `repeat(${width}, 1fr)`;
-  board.innerHTML = '';
+  boardEl.style.gridTemplateColumns = `repeat(${width}, 1fr)`;
+  boardEl.innerHTML = '';
   cells = [];
   for (let i = 0; i < width * height; i++) {
-    cells.push(board.appendChild(document.createElement('div')));
+    const cell = document.createElement('div');
+    boardEl.appendChild(cell);
+    cells.push(cell);
   }
 }
 
-function buildLogits(names) {
-  document.getElementById('logits').innerHTML = names.map((name, i) => `
+function buildLogits(actionNames) {
+  names = actionNames;
+  document.getElementById('logits').innerHTML = actionNames.map((name, i) => `
     <div class="bar" id="bar${i}">
-      <span>${name}</span>
-      <span class="track"><span class="fill"></span></span>
+      <span>${name.toLowerCase().replace('_', ' ')}</span>
+      <div class="track"><div class="fill"></div></div>
       <span class="value"></span>
     </div>`).join('');
 }
 
+function drawBoard(state) {
+  const falling = new Set(state.falling.map(([r, c]) => r * state.width + c));
+  state.locked.forEach((row, r) => row.forEach((filled, c) => {
+    const i = r * state.width + c;
+    cells[i].className = falling.has(i) ? 'falling' : (filled ? 'locked' : '');
+  }));
+}
+
 function drawLogits(logits, chosen) {
   const low = Math.min(...logits), high = Math.max(...logits);
-  const span = high - low || 1;
+  const span = (high - low) || 1;
   logits.forEach((value, i) => {
     const bar = document.getElementById('bar' + i);
     bar.classList.toggle('chosen', i === chosen);
-    bar.querySelector('.fill').style.width = ((value - low) / span * 100) + '%';
-    bar.querySelector('.value').textContent = value.toFixed(2);
+    bar.querySelector('.fill').style.width = (8 + 92 * (value - low) / span) + '%';
+    bar.querySelector('.value').textContent = value.toFixed(3);
   });
 }
 
-function draw(state) {
-  if (cells.length !== state.width * state.height) {
-    buildBoard(state.width, state.height);
-    buildLogits(state.action_names);
-  }
+function render(state) {
+  if (!cells.length) buildBoard(state.width, state.height);
+  if (!names) buildLogits(state.action_names);
+  if (state.census) document.getElementById('census').textContent = state.census;
 
-  cells.forEach(cell => { cell.className = ''; });
-  state.locked.forEach((row, y) => row.forEach((filled, x) => {
-    if (filled) cells[y * state.width + x].className = 'locked';
-  }));
-  state.falling.forEach(([y, x]) => { cells[y * state.width + x].className = 'falling'; });
-
+  drawBoard(state);
   document.getElementById('episode').textContent = state.episode;
   document.getElementById('frame').textContent = state.frame;
   document.getElementById('lines').textContent = state.lines;
   document.getElementById('action').textContent = state.action || '-';
   document.getElementById('over').textContent = state.over ? 'topped out' : 'playing';
 
-  document.getElementById('neurons').textContent = state.neurons.toLocaleString();
-  document.getElementById('connections').textContent = state.connections.toLocaleString();
-  document.getElementById('visual').textContent = state.visual.toLocaleString();
-  document.getElementById('motor').textContent = state.motor.toLocaleString();
-  document.getElementById('reward').textContent = state.reward.toLocaleString();
-  document.getElementById('rate').textContent = (state.motor_rate * 100).toFixed(1) + '%';
+  const reward = document.getElementById('reward');
+  reward.textContent = (state.reward > 0 ? '+' : '') + state.reward.toFixed(1);
+  reward.className = state.reward > 0 ? 'good' : (state.reward < 0 ? 'bad' : '');
+  document.getElementById('total').textContent = state.reward_total.toFixed(1);
+  document.getElementById('dopamine').textContent = state.dopamine.toFixed(4);
+
+  document.getElementById('holes').textContent = state.board.holes;
+  document.getElementById('bumpiness').textContent = state.board.bumpiness;
+  document.getElementById('height').textContent = state.board.aggregate_height;
+  document.getElementById('wells').textContent = state.board.wells;
+
+  document.getElementById('rate').textContent = state.motor_rate.toFixed(4);
+  document.getElementById('active').textContent =
+      (100 * state.active_fraction).toFixed(1) + '% firing';
 
   drawLogits(state.logits, state.action_index);
 }
 
 async function poll() {
   try {
-    draw(await (await fetch('/state')).json());
-  } catch (error) {
-    document.getElementById('over').textContent = 'server gone';
-  }
-  setTimeout(poll, 60);
+    const res = await fetch('/state');
+    render(await res.json());
+  } catch (err) { /* server going away; keep trying */ }
+  setTimeout(poll, 120);
 }
+
 poll();
 </script>
 </body>
@@ -234,6 +263,16 @@ class GameRunner:
         self.max_frames = max_frames
         self.seed = seed
 
+        self._total = 0.0
+        self._frame = 0
+
+        connectome = agent.connectome
+        self._census = (f'{len(connectome):,} neurons - '
+                        f'{connectome.matrix._nnz() / 1e6:.1f}M synapses - '
+                        f'{len(connectome.visual):,} visual - '
+                        f'{len(connectome.motor):,} motor - '
+                        f'{len(connectome.reward):,} dopamine')
+
         self._lock = threading.Lock()
         self._state = self._describe(TetrisGame(seed=seed), action=None, frame=0,
                                      episode=0)
@@ -258,9 +297,11 @@ class GameRunner:
             episode += 1
             game = TetrisGame(seed=self.seed + episode - 1)
             self.agent.reset()
+            self._total = 0.0
 
             for frame in range(1, self.max_frames + 1):
                 action = self.agent.play_frame(game)
+                self._total += self.agent.reward
                 self._publish(game, action, frame, episode)
                 time.sleep(self.delay)
                 if game.over:
@@ -312,11 +353,14 @@ class GameRunner:
             'action_names': [a.name for a in Action],
             'logits': [round(v, 4) for v in self.agent.logits.tolist()],
             'motor_rate': round(float(motor_rates.mean()), 4),
-            'neurons': len(connectome),
-            'connections': connectome.matrix._nnz(),
-            'visual': len(connectome.visual),
-            'motor': len(connectome.motor),
-            'reward': len(connectome.reward),
+            'active_fraction': round(float((self.agent.rates > 0).float().mean()), 4),
+            # The reward rule's verdict on the last frame, the episode so far,
+            # and the current the reward became at the dopamine neurons.
+            'reward': round(float(self.agent.reward), 2),
+            'reward_total': round(float(self._total), 1),
+            'dopamine': round(float(self.agent.dopamine), 4),
+            'board': game.features(),
+            'census': self._census,
         }
 
 

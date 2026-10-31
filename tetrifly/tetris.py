@@ -1,10 +1,16 @@
 """The simplest Tetris that still makes sense as a control problem.
 
-Deliberately left out, because the agent has only four controls and the first
-iteration should be easy to reason about: no next-piece preview, no hold slot,
-no soft or hard drop, no wall kicks, no levels or speed-up, no multi-line score
-bonus. Gravity pulls the piece down exactly one row per frame, so a frame is a
-fixed unit of time for both the game and the brain simulation.
+Deliberately left out, to keep the first iteration easy to reason about: no
+next-piece preview, no hold slot, no soft drop, no wall kicks, no levels or
+speed-up, no multi-line score bonus. Gravity pulls the piece down exactly one
+row per frame, so a frame is a fixed unit of time for both the game and the
+brain simulation.
+
+``Action.DROP`` is the exception: it slams the piece to its resting place in a
+single frame, the space bar of an ordinary Tetris. Without it the agent cannot
+choose *when* a piece lands, only nudge it while gravity decides - so every
+piece consumed the same ~19 frames and placement quality was nearly invisible
+in how long an episode lasted.
 
 Coordinates are (row, column) with row 0 at the top of the board.
 """
@@ -16,16 +22,18 @@ import torch
 
 
 class Action(IntEnum):
-    """The four controls the decoder chooses between.
+    """The five controls the decoder chooses between.
 
     The values are the decoder's output node order, so ``Action(argmax)`` is
-    the chosen control.
+    the chosen control. ``Decoder`` sizes its output layer from ``len(Action)``,
+    so adding a control here widens the decoder automatically.
     """
 
     LEFT = 0
     RIGHT = 1
     ROTATE_LEFT = 2
     ROTATE_RIGHT = 3
+    DROP = 4
 
 
 def _rotate(cells, box):
@@ -133,6 +141,11 @@ class TetrisGame:
         piece: The piece currently under the agent's control.
         lines: Rows cleared so far this episode - the score.
         over: Whether the episode has ended by topping out.
+        applied: Whether the last action actually moved the piece, or was
+            rejected as illegal and silently ignored.
+        locked: Whether a piece came to rest on the last frame.
+        landing_height: Rows above the floor where that piece came to rest.
+        eroded_cells: Cells of that piece which a line clear consumed.
     """
 
     WIDTH = 10
@@ -155,6 +168,12 @@ class TetrisGame:
         self.board = [[0] * self.WIDTH for _ in range(self.HEIGHT)]
         self.lines = 0
         self.over = False
+        # Set by _apply_gravity on the frame a piece comes to rest, so the
+        # reward can score the placement that just happened.
+        self.locked = False
+        self.landing_height = 0
+        self.eroded_cells = 0
+        self.applied = True
         self.piece = self._spawn()
 
     # ------------------------------------------------------------------
@@ -226,13 +245,39 @@ class TetrisGame:
             candidate = self.piece.moved(0, +1)
         elif action == Action.ROTATE_LEFT:
             candidate = self.piece.rotated(-1)
-        else:
+        elif action == Action.ROTATE_RIGHT:
             candidate = self.piece.rotated(+1)
+        else:
+            candidate = self._dropped(self.piece)
 
-        if self._fits(candidate):
+        # Recorded so the reward can charge for an action that did nothing:
+        # walking into a wall or a rotation that does not fit is ignored here,
+        # and without this the agent has no way to be told it wasted a frame.
+        self.applied = self._fits(candidate)
+        if self.applied:
             self.piece = candidate
 
+        # One row of gravity always follows. After a DROP the piece is already
+        # resting, so this is the step that fails to move it and locks it -
+        # every placement goes through the same code path.
         return self._apply_gravity()
+
+    def _dropped(self, piece):
+        """Find where a piece comes to rest if it falls freely.
+
+        Args:
+            piece: The piece to drop.
+
+        Returns:
+            The lowest placement that still fits. The piece itself if it is
+            already resting on something.
+        """
+        resting = piece
+        while True:
+            lower = resting.moved(1, 0)
+            if not self._fits(lower):
+                return resting
+            resting = lower
 
     def _apply_gravity(self):
         """Drop the piece one row, locking and resolving the board if it lands.
@@ -240,13 +285,22 @@ class TetrisGame:
         Returns:
             (lines_cleared, game_over) for this frame.
         """
+        self.locked = False
         dropped = self.piece.moved(1, 0)
         if self._fits(dropped):
             self.piece = dropped
             return 0, False
 
-        for row, col in self.piece.cells():
+        cells = self.piece.cells()
+        for row, col in cells:
             self.board[row][col] = 1
+
+        # Recorded before the rows vanish, because the reward needs to know
+        # how much of *this* piece was consumed by the clear.
+        full = [row for row in range(self.HEIGHT) if all(self.board[row])]
+        self.landing_height = self.HEIGHT - max(row for row, _ in cells)
+        self.eroded_cells = len(full) * sum(1 for row, _ in cells if row in full)
+        self.locked = True
 
         cleared = self._clear_full_rows()
         self.lines += cleared
@@ -254,6 +308,101 @@ class TetrisGame:
         self.piece = self._spawn()
         self.over = not self._fits(self.piece)
         return cleared, self.over
+
+    # ------------------------------------------------------------------
+    # Board quality
+    # ------------------------------------------------------------------
+
+    def heights(self):
+        """Measure how high the stack reaches in each column.
+
+        Returns:
+            One height per column, counted up from the floor. 0 is an empty
+            column, HEIGHT a full one.
+        """
+        heights = []
+        for col in range(self.WIDTH):
+            height = 0
+            for row in range(self.HEIGHT):
+                if self.board[row][col]:
+                    height = self.HEIGHT - row
+                    break
+            heights.append(height)
+        return heights
+
+    def features(self):
+        """Describe the shape of the stack, for the reward to score.
+
+        These are the features classical Tetris players are built on (the
+        Dellacherie set). They exist because cleared lines alone say almost
+        nothing until the agent is already competent: a board can be one row
+        from a clear or riddled with holes and score the same. Each of these
+        separates those two cases on every single placement.
+
+        Returns:
+            A dict of:
+              aggregate_height - total stack height, summed over columns.
+              max_height       - the tallest column.
+              holes            - empty cells with something filled above them.
+                                 The expensive mistake: only a clear above can
+                                 free them.
+              bumpiness        - total height difference between neighbouring
+                                 columns. A jagged surface fits fewer pieces.
+              row_transitions  - filled-to-empty changes scanning each row.
+                                 Walls count as filled, so a solid row scores 0.
+              col_transitions  - the same down each column, floor filled.
+              wells            - total depth of one-wide gaps, which only an I
+                                 piece can fill.
+        """
+        heights = self.heights()
+
+        holes = 0
+        for col in range(self.WIDTH):
+            covered = False
+            for row in range(self.HEIGHT):
+                if self.board[row][col]:
+                    covered = True
+                elif covered:
+                    holes += 1
+
+        bumpiness = sum(abs(heights[i] - heights[i + 1])
+                        for i in range(self.WIDTH - 1))
+
+        row_transitions = 0
+        for row in range(self.HEIGHT):
+            previous = 1                      # the wall on the left
+            for col in range(self.WIDTH):
+                cell = self.board[row][col]
+                row_transitions += cell != previous
+                previous = cell
+            row_transitions += previous != 1  # the wall on the right
+
+        col_transitions = 0
+        for col in range(self.WIDTH):
+            previous = 0                      # open sky above the stack
+            for row in range(self.HEIGHT):
+                cell = self.board[row][col]
+                col_transitions += cell != previous
+                previous = cell
+            col_transitions += previous != 1  # the floor below it
+
+        wells = 0
+        for col in range(self.WIDTH):
+            left = heights[col - 1] if col > 0 else self.HEIGHT
+            right = heights[col + 1] if col < self.WIDTH - 1 else self.HEIGHT
+            depth = min(left, right) - heights[col]
+            if depth > 0:
+                # A well of depth d needs d cells to fill, and each row of it
+                # is harder to reach than the last.
+                wells += depth * (depth + 1) // 2
+
+        return {'aggregate_height': sum(heights),
+                'max_height': max(heights),
+                'holes': holes,
+                'bumpiness': bumpiness,
+                'row_transitions': row_transitions,
+                'col_transitions': col_transitions,
+                'wells': wells}
 
     # ------------------------------------------------------------------
     # What the agent sees

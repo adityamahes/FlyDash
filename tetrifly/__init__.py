@@ -7,7 +7,7 @@ Three modules:
 * :mod:`tetrifly.agent` - the encoder, decoder, agent loop and trainer.
 """
 
-from .agent import Agent, Decoder, Encoder, Trainer
+from .agent import Agent, Decoder, Encoder, Reward, Trainer
 from .brain import Connectome, SpikingNetwork
 from .tetris import Action, Piece, TetrisGame
 
@@ -18,6 +18,7 @@ __all__ = [
     'Decoder',
     'Encoder',
     'Piece',
+    'Reward',
     'SpikingNetwork',
     'TetrisGame',
     'Trainer',
